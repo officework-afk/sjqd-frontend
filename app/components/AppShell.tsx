@@ -145,8 +145,8 @@ export default function AppShell({ children }: Props) {
       items: [
         { label: "Sales", path: "/sales" },
         { label: "Purchase", path: "/purchase" },
-        { label: "Sales Return", path: "/sales-return" },
-        { label: "Purchase Return", path: "/purchase-return" },
+        { label: "Credit Note", path: "/sales-return" },
+        { label: "Debit Note", path: "/purchase-return" },
       ],
     },
     {

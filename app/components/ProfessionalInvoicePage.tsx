@@ -20,12 +20,26 @@ import {
   positiveTableHead,
   positiveText,
 } from "./positiveTheme";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 const API = API_BASE_URL;
 
-type PageType = "sales" | "purchase" | "sales-return" | "purchase-return";
+type PageType =
+  | "sales"
+  | "purchase"
+  | "sales-return"
+  | "purchase-return"
+  | "sales-adjustment"
+  | "purchase-adjustment";
 
 type InvoiceLine = {
   id: number;
@@ -41,6 +55,22 @@ type InvoiceLine = {
   cgst: number;
   sgst: number;
   igst: number;
+  totalAmount: number;
+};
+
+type OriginalInvoiceSnapshot = {
+  endpoint: string;
+  recordId: number | null;
+  invoiceNo: string;
+  originalInvoiceNo: string;
+  partyName: string;
+  gstNo: string;
+  dueDate: string;
+  phone: string;
+  state: string;
+  pincode: string;
+  address: string;
+  items: InvoiceLine[];
   totalAmount: number;
 };
 
@@ -67,6 +97,9 @@ type NewItemForm = {
 
 type FocusZone = "customer" | "item" | "other";
 
+const normalizeItemNameKey = (value: unknown) =>
+  String(value || "").trim().toLowerCase();
+
 const sortPartyRows = (rows: PartyRow[]) =>
   [...rows].sort((a, b) =>
     String(a.partyName || "").localeCompare(String(b.partyName || ""), undefined, {
@@ -78,6 +111,30 @@ const getTodayDateInput = () => {
   const now = new Date();
   const shifted = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
   return shifted.toISOString().slice(0, 10);
+};
+
+const normalizeApiPath = (value: string) =>
+  value.startsWith("/") ? value : `/${value}`;
+
+const getDirectApiUrl = (path: string) => {
+  const normalizedPath = normalizeApiPath(path);
+
+  if (typeof window === "undefined") {
+    return `http://127.0.0.1:5000${normalizedPath}`;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+  const hostname = window.location.hostname || "127.0.0.1";
+  return `${protocol}//${hostname}:5000${normalizedPath}`;
+};
+
+const shouldRetryWithDirectBackend = (response: Response, bodyText: string) => {
+  if (response.ok) return false;
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("text/html")) return false;
+
+  return /Cannot (GET|POST|PUT|DELETE|PATCH)\s+/i.test(bodyText);
 };
 
 const padDatePart = (value: number) => String(value).padStart(2, "0");
@@ -178,6 +235,7 @@ type FlexibleDateFieldProps = {
 
 export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { isMobile, isTablet } = useResponsive();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const originalInvoiceRef = useRef<HTMLInputElement | null>(null);
@@ -196,9 +254,14 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const dueDateInputRef = useRef<HTMLInputElement | null>(null);
   const dueDateFieldRef = useRef<FlexibleDateFieldHandle | null>(null);
   const customerDropdownRef = useRef<HTMLDivElement | null>(null);
+  const originalInvoiceDropdownRef = useRef<HTMLDivElement | null>(null);
   const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false);
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerHighlightIdx, setCustomerHighlightIdx] = useState(0);
+  const [originalInvoiceDropdownOpen, setOriginalInvoiceDropdownOpen] =
+    useState(false);
+  const [originalInvoiceHighlightIdx, setOriginalInvoiceHighlightIdx] =
+    useState(0);
 
   const focusZoneRef = useRef<FocusZone>("other");
   const [isMasterItem, setIsMasterItem] = useState(false);
@@ -252,38 +315,88 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       isIncoming: false,
     },
     "sales-return": {
-      title: "Sales Return",
+      title: "Credit Note",
       endpoint: "sales-return",
+      sourceEndpoint: "sales",
       noKey: "returnNo",
       partyKey: "partyName",
       partyLabel: "Customer",
       partyMasterType: "buyer",
       partyStorageKey: "buyerMaster",
       prefixKey: "salesReturnPrefix",
-      prefixDefault: "SR",
-      saveText: "Save Sales Return",
+      prefixDefault: "CN",
+      saveText: "Save Credit Note",
       color: "#db2777",
       isReturn: true,
+      showOriginalInvoice: true,
+      numberLabel: "Credit Note Number",
       isIncoming: false,
     },
     "purchase-return": {
-      title: "Purchase Return",
+      title: "Debit Note",
       endpoint: "purchase-return",
+      sourceEndpoint: "purchase",
       noKey: "returnNo",
       partyKey: "supplierName",
       partyLabel: "Supplier",
       partyMasterType: "supplier",
       partyStorageKey: "supplierMaster",
       prefixKey: "purchaseReturnPrefix",
-      prefixDefault: "PR",
-      saveText: "Save Purchase Return",
+      prefixDefault: "DN",
+      saveText: "Save Debit Note",
       color: "#2563eb",
       isReturn: true,
+      showOriginalInvoice: true,
+      numberLabel: "Debit Note Number",
       isIncoming: true,
+    },
+    "sales-adjustment": {
+      title: "Sales Adjustment Note",
+      endpoint: "sales-adjustment",
+      sourceEndpoint: "sales",
+      noKey: "noteNo",
+      partyKey: "partyName",
+      partyLabel: "Customer",
+      partyMasterType: "buyer",
+      partyStorageKey: "buyerMaster",
+      saveText: "Save Sales Adjustment Note",
+      color: "#b45309",
+      isIncoming: true,
+      isAdjustment: true,
+      showOriginalInvoice: true,
+      numberLabel: "Adjustment Note Number",
+      amountLabel: "Adjustment Amount",
+      autoNumberText: "Will be generated on save",
+    },
+    "purchase-adjustment": {
+      title: "Purchase Adjustment Note",
+      endpoint: "purchase-adjustment",
+      sourceEndpoint: "purchase",
+      noKey: "noteNo",
+      partyKey: "supplierName",
+      partyLabel: "Supplier",
+      partyMasterType: "supplier",
+      partyStorageKey: "supplierMaster",
+      saveText: "Save Purchase Adjustment Note",
+      color: "#1d4ed8",
+      isIncoming: true,
+      isAdjustment: true,
+      showOriginalInvoice: true,
+      numberLabel: "Adjustment Note Number",
+      amountLabel: "Adjustment Amount",
+      autoNumberText: "Will be generated on save",
     },
   }[type];
 
   const enableCustomerAccountShortcuts = cfg.partyLabel === "Customer";
+  const isPurchaseSide =
+    type === "purchase" ||
+    type === "purchase-return" ||
+    type === "purchase-adjustment";
+  const isSalesSide =
+    type === "sales" ||
+    type === "sales-return" ||
+    type === "sales-adjustment";
 
   const isQuickAccountPartyName = (value: string) => {
     const normalized = normalizeAccountMode(value, value);
@@ -301,10 +414,14 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
   const [company, setCompany] = useState<any>({});
   const [entries, setEntries] = useState<any[]>([]);
+  const [sourceEntries, setSourceEntries] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [parties, setParties] = useState<PartyRow[]>([]);
   const [invoiceItems, setInvoiceItems] = useState<InvoiceLine[]>([]);
+  const [originalSnapshot, setOriginalSnapshot] =
+    useState<OriginalInvoiceSnapshot | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [editSourceInvoiceNo, setEditSourceInvoiceNo] = useState("");
   const [showLiveCamera, setShowLiveCamera] = useState(false);
   const [showPaymentOptions, setShowPaymentOptions] = useState(false);
   const [showPartyModal, setShowPartyModal] = useState(false);
@@ -354,6 +471,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const [form, setForm] = useState<any>({
     invoiceNo: "",
     returnNo: "",
+    noteNo: "",
     originalInvoiceNo: "",
     partyName: "",
     supplierName: "",
@@ -370,10 +488,17 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     discountType: "percentage",
     discountValue: 0,
   });
+  const [editIdParam, setEditIdParam] = useState("");
+  const [sourceIdParam, setSourceIdParam] = useState("");
 
   useEffect(() => {
     loadAll();
   }, [type]);
+
+  useEffect(() => {
+    setEditIdParam(searchParams.get("editId") || "");
+    setSourceIdParam(searchParams.get("sourceId") || "");
+  }, [searchParams, type]);
 
   useEffect(() => {
     return () => stopLiveCamera();
@@ -395,6 +520,12 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       }
       if (customerDropdownRef.current && !customerDropdownRef.current.contains(e.target as Node)) {
         setCustomerDropdownOpen(false);
+      }
+      if (
+        originalInvoiceDropdownRef.current &&
+        !originalInvoiceDropdownRef.current.contains(e.target as Node)
+      ) {
+        setOriginalInvoiceDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -522,10 +653,36 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
-  const getPaymentStatusLabel = (pendingAmount: number, settledAmount: number) => {
-    if (pendingAmount <= 0) return cfg.isIncoming ? "Received" : "Paid";
-    if (settledAmount > 0) return cfg.isIncoming ? "Partial Received" : "Partial Paid";
-    return cfg.isIncoming ? "Not Received" : "Not Paid";
+  const getPaymentFlow = (payload?: any) => {
+    if (cfg.isAdjustment) {
+      const adjustmentType = String(
+        payload?.adjustmentType || payload?.noteType || "",
+      )
+        .trim()
+        .toUpperCase();
+
+      if (adjustmentType === "CREDIT") {
+        return { isIncoming: false, title: "Credit Note" };
+      }
+
+      if (adjustmentType === "DEBIT") {
+        return { isIncoming: true, title: "Debit Note" };
+      }
+    }
+
+    return {
+      isIncoming: Boolean(cfg.isIncoming),
+      title: cfg.title,
+    };
+  };
+  const getPaymentStatusLabel = (
+    pendingAmount: number,
+    settledAmount: number,
+    isIncoming = cfg.isIncoming,
+  ) => {
+    if (pendingAmount <= 0) return isIncoming ? "Received" : "Paid";
+    if (settledAmount > 0) return isIncoming ? "Partial Received" : "Partial Paid";
+    return isIncoming ? "Not Received" : "Not Paid";
   };
   const getPaymentSplitTotals = (total: number, split = paymentSplit) => {
     const cashAmount = Math.max(parseMoneyInput(split.cash), 0);
@@ -590,31 +747,45 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
   const loadAll = async () => {
     try {
-      const [companyRes, entryRes, itemRes] = await Promise.all([
+      const [companyRes, entryRes, itemRes, sourceEntryRes] = await Promise.all([
         fetch(`${API}/company`).catch(() => null),
         fetch(`${API}/${cfg.endpoint}`).catch(() => null),
         fetch(`${API}/items`).catch(() => null),
+        cfg.sourceEndpoint
+          ? fetch(`${API}/${cfg.sourceEndpoint}`).catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       const companyData = companyRes ? await companyRes.json().catch(() => ({})) : {};
       const entryData = entryRes ? await entryRes.json().catch(() => []) : [];
       const itemData = itemRes ? await itemRes.json().catch(() => []) : [];
+      const sourceData = sourceEntryRes
+        ? await sourceEntryRes.json().catch(() => [])
+        : [];
 
       setCompany(companyData || {});
       setEntries(Array.isArray(entryData) ? entryData : []);
+      setSourceEntries(Array.isArray(sourceData) ? sourceData : []);
       setItems(Array.isArray(itemData) ? itemData : getStorageArray("items"));
     } catch (err) {
       console.error("Load error:", err);
       setCompany({});
       setEntries([]);
+      setSourceEntries([]);
       setItems(getStorageArray("items"));
     }
 
     loadParties();
   };
 
-  const prefix = company?.[cfg.prefixKey] || cfg.prefixDefault;
-  const autoNo = `${prefix}-${new Date().getFullYear()}-${String(entries.length + 1).padStart(4, "0")}`;
+  const prefix = cfg.prefixKey
+    ? company?.[cfg.prefixKey] || cfg.prefixDefault
+    : cfg.isAdjustment
+    ? "ADJ"
+    : "";
+  const autoNo = cfg.isAdjustment
+    ? cfg.autoNumberText || "Will be generated on save"
+    : `${prefix}-${new Date().getFullYear()}-${String(entries.length + 1).padStart(4, "0")}`;
 
   const update = (key: string, value: any) => {
     setForm((prev: any) => ({ ...prev, [key]: value }));
@@ -659,6 +830,55 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
     return sortPartyRows(Array.from(deduped.values()));
   }, [enableCustomerAccountShortcuts, parties]);
+
+  const itemOptions = useMemo(() => {
+    const merged = new Map<string, any>();
+
+    (Array.isArray(items) ? items : []).forEach((rawItem: any) => {
+      const itemName = String(rawItem?.itemName || "").trim();
+      const key = normalizeItemNameKey(itemName);
+      if (!key) return;
+
+      const current = merged.get(key);
+      if (!current) {
+        merged.set(key, {
+          ...rawItem,
+          itemName,
+          currentStock: Number(rawItem?.currentStock || 0),
+          gstRate: Number(rawItem?.gstRate || rawItem?.gst || 0),
+          salesRate: Number(rawItem?.salesRate || rawItem?.rate || 0),
+          purchaseRate: Number(rawItem?.purchaseRate || rawItem?.rate || 0),
+          duplicateCount: 1,
+        });
+        return;
+      }
+
+      merged.set(key, {
+        ...current,
+        barcode: current.barcode || rawItem?.barcode || "",
+        itemName: current.itemName || itemName,
+        currentStock:
+          Number(current.currentStock || 0) +
+          Number(rawItem?.currentStock || 0),
+        gstRate:
+          Number(current.gstRate || 0) ||
+          Number(rawItem?.gstRate || rawItem?.gst || 0),
+        salesRate:
+          Number(current.salesRate || 0) ||
+          Number(rawItem?.salesRate || rawItem?.rate || 0),
+        purchaseRate:
+          Number(current.purchaseRate || 0) ||
+          Number(rawItem?.purchaseRate || rawItem?.rate || 0),
+        duplicateCount: Number(current.duplicateCount || 1) + 1,
+      });
+    });
+
+    return Array.from(merged.values()).sort((a, b) =>
+      String(a.itemName || "").localeCompare(String(b.itemName || ""), undefined, {
+        sensitivity: "base",
+      }),
+    );
+  }, [items]);
 
   const findCustomerOption = (rawValue: string) => {
     const typedValue = String(rawValue || "").trim();
@@ -821,13 +1041,16 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   };
 
   const selectItem = (itemName: string) => {
-    const selectedItem = items.find((x: any) => String(x.itemName) === String(itemName));
+    const selectedItem = itemOptions.find(
+      (x: any) =>
+        normalizeItemNameKey(x.itemName) === normalizeItemNameKey(itemName),
+    );
     setForm((prev: any) => ({
       ...prev,
       itemName: selectedItem?.itemName || itemName,
       gstRate: Number(selectedItem?.gstRate || selectedItem?.gst || 0),
       rate:
-        type === "purchase" || type === "purchase-return"
+        isPurchaseSide
           ? Number(selectedItem?.purchaseRate || selectedItem?.rate || 0)
           : Number(selectedItem?.salesRate || selectedItem?.rate || 0),
     }));
@@ -840,7 +1063,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     const q = String(code || "").trim().toLowerCase();
     if (!q) return null;
     return (
-      items.find((x: any) =>
+      itemOptions.find((x: any) =>
         [x.barcode, x.itemCode, x.code, x.sku, x.itemName]
           .map((v) => String(v || "").toLowerCase())
           .includes(q)
@@ -851,7 +1074,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const addOrIncreaseScannedItem = (item: any, qtyToAdd = 1) => {
     const itemName = item.itemName || item.name || "";
     const rate =
-      type === "purchase" || type === "purchase-return"
+      isPurchaseSide
         ? Number(item.purchaseRate || item.rate || 0)
         : Number(item.salesRate || item.rate || 0);
     const gstRate = Number(item.gstRate || item.gst || 0);
@@ -926,13 +1149,36 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   };
 
   const saveNewItem = async () => {
-    if (!newItem.itemName.trim()) {
+    const trimmedItemName = newItem.itemName.trim();
+    if (!trimmedItemName) {
       alert("Item name required");
       return;
     }
 
+    const duplicateItem = itemOptions.find(
+      (item: any) =>
+        normalizeItemNameKey(item.itemName) ===
+        normalizeItemNameKey(trimmedItemName),
+    );
+    if (duplicateItem) {
+      alert(`Item "${duplicateItem.itemName}" already exists.`);
+      setShowItemModal(false);
+      pendingScannedBarcodeRef.current = "";
+      setNewItemModalTitle("Add New Item");
+      setNewItem({
+        itemName: "",
+        barcode: "",
+        gstRate: "",
+        salesRate: "",
+        purchaseRate: "",
+        openingStock: "",
+      });
+      selectItem(duplicateItem.itemName);
+      return;
+    }
+
     const payload: any = {
-      itemName: newItem.itemName.trim(),
+      itemName: trimmedItemName,
       barcode: newItem.barcode.trim(),
       gstRate: Number(newItem.gstRate || 0),
       salesRate: Number(newItem.salesRate || 0),
@@ -949,9 +1195,31 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (res.ok) {
-        saved = await res.json().catch(() => payload);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        if (res.status === 409) {
+          const existingName = String(
+            errorData?.item?.itemName || payload.itemName,
+          ).trim();
+          alert(errorData?.message || `Item "${existingName}" already exists.`);
+          setShowItemModal(false);
+          pendingScannedBarcodeRef.current = "";
+          setNewItemModalTitle("Add New Item");
+          setNewItem({
+            itemName: "",
+            barcode: "",
+            gstRate: "",
+            salesRate: "",
+            purchaseRate: "",
+            openingStock: "",
+          });
+          selectItem(existingName);
+          return;
+        }
+        throw new Error(errorData?.message || "Item save failed");
       }
+
+      saved = await res.json().catch(() => payload);
     } catch {
       // boundaries clean fallback
     }
@@ -1050,6 +1318,17 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const grandTotal = Math.round(amountBeforeRound);
   const roundOff = Number((grandTotal - amountBeforeRound).toFixed(2));
   const totalAmount = grandTotal;
+  const originalInvoiceTotal = Number(originalSnapshot?.totalAmount || 0);
+  const adjustmentDifference = Number(
+    (totalAmount - originalInvoiceTotal).toFixed(2),
+  );
+  const adjustmentAmount = Math.abs(adjustmentDifference);
+  const adjustmentNoteLabel =
+    adjustmentDifference < 0
+      ? "Credit Note"
+      : adjustmentDifference > 0
+      ? "Debit Note"
+      : "Adjustment Note";
 
   const addItemToInvoice = () => {
     if (!form.itemName || !Number(form.quantity || 0) || !Number(form.rate || 0)) {
@@ -1101,9 +1380,14 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
   const clearForm = () => {
     setEditingId(null);
+    setEditSourceInvoiceNo("");
+    setOriginalSnapshot(null);
     setInvoiceItems([]);
     setBarcode("");
     setCustomerSearch("");
+    setCustomerDropdownOpen(false);
+    setOriginalInvoiceDropdownOpen(false);
+    setOriginalInvoiceHighlightIdx(0);
     setIsMasterItem(false);
     setPaymentSplit({ cash: "", bank: "" });
     pendingScannedBarcodeRef.current = "";
@@ -1111,6 +1395,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     setForm({
       invoiceNo: "",
       returnNo: "",
+      noteNo: "",
       originalInvoiceNo: "",
       partyName: "",
       supplierName: "",
@@ -1130,8 +1415,363 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     setTimeout(() => customerInputRef.current?.focus(), 100);
   };
 
+  const resolveDocumentNo = (value?: any) =>
+    String(
+      value?.noteNo ||
+        value?.invoiceNo ||
+        value?.returnNo ||
+        value?.[cfg.noKey] ||
+        "",
+    ).trim();
+
+  const getStoredInvoiceMeta = (
+    endpointKey: string,
+    recordId: number | null,
+    invoiceNo: string,
+  ) => {
+    try {
+      const store = JSON.parse(localStorage.getItem("invoiceInvoiceMeta") || "{}");
+
+      if (recordId && store[`${endpointKey}:${recordId}`]) {
+        return store[`${endpointKey}:${recordId}`];
+      }
+
+      if (invoiceNo && store[`${endpointKey}:${invoiceNo}`]) {
+        return store[`${endpointKey}:${invoiceNo}`];
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const buildLinesFromEntry = (entry: any, storedMeta: any): InvoiceLine[] =>
+    Array.isArray(storedMeta?.items) && storedMeta.items.length > 0
+      ? storedMeta.items.map((line: any, index: number) =>
+          calcLine({
+            ...line,
+            id:
+              Number(line?.id || 0) ||
+              Date.now() + index + Math.floor(Math.random() * 10000),
+          }),
+        )
+      : entry?.itemName
+      ? [
+          calcLine({
+            id: Date.now() + Math.floor(Math.random() * 10000),
+            itemName: entry.itemName,
+            quantity: Number(entry.quantity || 0),
+            rate: Number(entry.rate || 0),
+            gstRate: Number(entry.gstRate || 0),
+            discountType: storedMeta?.discountType || "percentage",
+            discountValue: Number(storedMeta?.discountValue || 0),
+          }),
+        ]
+      : [];
+
+  const buildOriginalSnapshot = (
+    entry: any,
+    endpointKey = cfg.endpoint,
+  ): OriginalInvoiceSnapshot => {
+    const recordId = Number(entry?.id || 0);
+    const invoiceNo = resolveDocumentNo(entry);
+    const storedMeta = getStoredInvoiceMeta(
+      endpointKey,
+      Number.isFinite(recordId) && recordId > 0 ? recordId : null,
+      invoiceNo,
+    );
+    const partyName = String(
+      entry?.partyName || entry?.supplierName || storedMeta?.partyName || storedMeta?.supplierName || "",
+    ).trim();
+    const matchedParty = findCustomerOption(partyName);
+    const dueDate =
+      String(storedMeta?.dueDate || entry?.dueDate || "").trim() ||
+      resolveInvoiceDueDate(matchedParty, partyName);
+    const lines = buildLinesFromEntry(entry, storedMeta).filter(
+      (line) => line.itemName,
+    );
+    const computedTotal = lines.reduce(
+      (sum, line) => sum + Number(line.totalAmount || 0),
+      0,
+    );
+
+    return {
+      endpoint: endpointKey,
+      recordId:
+        Number.isFinite(recordId) && recordId > 0 ? recordId : null,
+      invoiceNo,
+      originalInvoiceNo: String(
+        entry?.originalInvoiceNo || storedMeta?.originalInvoiceNo || "",
+      ).trim(),
+      partyName,
+      gstNo: String(
+        entry?.gstNo ||
+          storedMeta?.gstNo ||
+          matchedParty?.gstNo ||
+          (cfg.partyKey === "partyName" ? "B2C" : ""),
+      ),
+      dueDate,
+      phone: String(storedMeta?.phone || matchedParty?.phone || ""),
+      state: String(storedMeta?.state || matchedParty?.state || ""),
+      pincode: String(storedMeta?.pincode || matchedParty?.pincode || ""),
+      address: String(storedMeta?.address || matchedParty?.address || ""),
+      items: lines,
+      totalAmount:
+        Number(
+          storedMeta?.grandTotal ??
+            storedMeta?.totalAmount ??
+            entry?.adjustedTotalAmount ??
+            entry?.grandTotal ??
+            entry?.totalAmount,
+        ) || Math.round(computedTotal),
+    };
+  };
+
+  const replaceInvoiceReferenceText = (value: string, previousInvoiceNo: string, nextInvoiceNo: string) =>
+    String(value || "").split(previousInvoiceNo).join(nextInvoiceNo);
+
+  const renameInvoiceReferencesInStorage = (
+    storageKey: string,
+    previousInvoiceNo: string,
+    nextInvoiceNo: string,
+  ) => {
+    if (
+      !previousInvoiceNo ||
+      !nextInvoiceNo ||
+      previousInvoiceNo === nextInvoiceNo
+    ) {
+      return;
+    }
+
+    const rows = getStorageArray(storageKey);
+    const updatedRows = rows.map((row: any) => {
+      const rowInvoiceNo = String(row.invoiceNo || "").trim();
+      const rowReferenceNo = String(row.referenceNo || "").trim();
+      const matches =
+        rowInvoiceNo === previousInvoiceNo || rowReferenceNo === previousInvoiceNo;
+
+      if (!matches) {
+        return row;
+      }
+
+      return {
+        ...row,
+        invoiceNo: rowInvoiceNo === previousInvoiceNo ? nextInvoiceNo : row.invoiceNo,
+        referenceNo:
+          rowReferenceNo === previousInvoiceNo ? nextInvoiceNo : row.referenceNo,
+        remarks:
+          typeof row.remarks === "string"
+            ? replaceInvoiceReferenceText(
+                row.remarks,
+                previousInvoiceNo,
+                nextInvoiceNo,
+              )
+            : row.remarks,
+      };
+    });
+
+    localStorage.setItem(storageKey, JSON.stringify(updatedRows));
+  };
+
+  const loadSavedInvoiceForEdit = (entry: any) => {
+    const resolvedEditId = Number(entry?.id || 0);
+    const invoiceNo = resolveDocumentNo(entry);
+    const partyName = String(
+      entry?.[cfg.partyKey] || entry?.partyName || entry?.supplierName || "",
+    ).trim();
+    const storedMeta = getStoredInvoiceMeta(
+      cfg.endpoint,
+      Number.isFinite(resolvedEditId) && resolvedEditId > 0
+        ? resolvedEditId
+        : null,
+      invoiceNo,
+    );
+    const matchedParty = findCustomerOption(partyName);
+    const dueDate =
+      String(storedMeta?.dueDate || entry?.dueDate || "").trim() ||
+      resolveInvoiceDueDate(matchedParty, partyName);
+    const restoredLines = buildLinesFromEntry(entry, storedMeta);
+    const restoredOriginalLines =
+      cfg.isAdjustment &&
+      Array.isArray(storedMeta?.originalItems) &&
+      storedMeta.originalItems.length > 0
+        ? storedMeta.originalItems.map((line: any, index: number) =>
+            calcLine({
+              ...line,
+              id:
+                Number(line?.id || 0) ||
+                Date.now() + 50000 + index + Math.floor(Math.random() * 10000),
+            }),
+          )
+        : cfg.isAdjustment &&
+          Array.isArray(entry?.originalItems) &&
+          entry.originalItems.length > 0
+        ? entry.originalItems.map((line: any, index: number) =>
+            calcLine({
+              ...line,
+              id:
+                Number(line?.id || 0) ||
+                Date.now() + 70000 + index + Math.floor(Math.random() * 10000),
+            }),
+          )
+        : [];
+
+    setEditingId(resolvedEditId);
+    setEditSourceInvoiceNo(invoiceNo);
+    if (cfg.isAdjustment) {
+      setOriginalSnapshot({
+        endpoint: cfg.sourceEndpoint || cfg.endpoint,
+        recordId: null,
+        invoiceNo: String(
+          entry?.originalInvoiceNo || storedMeta?.originalInvoiceNo || "",
+        ).trim(),
+        originalInvoiceNo: "",
+        partyName,
+        gstNo: String(
+          entry?.gstNo ||
+            storedMeta?.gstNo ||
+            matchedParty?.gstNo ||
+            (cfg.partyKey === "partyName" ? "B2C" : ""),
+        ),
+        dueDate,
+        phone: String(storedMeta?.phone || matchedParty?.phone || ""),
+        state: String(storedMeta?.state || matchedParty?.state || ""),
+        pincode: String(storedMeta?.pincode || matchedParty?.pincode || ""),
+        address: String(storedMeta?.address || matchedParty?.address || ""),
+        items: restoredOriginalLines.filter((line: InvoiceLine) => line.itemName),
+        totalAmount:
+          Number(
+            storedMeta?.originalTotalAmount ?? entry?.originalTotalAmount ?? 0,
+          ) ||
+          Math.round(
+            restoredOriginalLines.reduce(
+              (sum: number, line: InvoiceLine) => sum + Number(line.totalAmount || 0),
+              0,
+            ),
+          ),
+      });
+    } else {
+      setOriginalSnapshot(null);
+    }
+    setInvoiceItems(restoredLines.filter((line) => line.itemName));
+    setBarcode("");
+    setCustomerSearch(partyName);
+    setIsMasterItem(false);
+    setPaymentSplit({ cash: "", bank: "" });
+    pendingScannedBarcodeRef.current = "";
+    setNewItemModalTitle("Add New Item");
+    setForm({
+      invoiceNo: cfg.noKey === "invoiceNo" ? invoiceNo : "",
+      returnNo: cfg.noKey === "returnNo" ? invoiceNo : "",
+      noteNo: cfg.noKey === "noteNo" ? invoiceNo : "",
+      originalInvoiceNo: String(
+        entry?.originalInvoiceNo || storedMeta?.originalInvoiceNo || "",
+      ),
+      partyName: cfg.partyKey === "partyName" ? partyName : "",
+      supplierName: cfg.partyKey === "supplierName" ? partyName : "",
+      dueDate,
+      gstNo: String(
+        entry?.gstNo ||
+          storedMeta?.gstNo ||
+          matchedParty?.gstNo ||
+          (cfg.partyKey === "partyName" ? "B2C" : ""),
+      ),
+      phone: String(storedMeta?.phone || matchedParty?.phone || ""),
+      state: String(storedMeta?.state || matchedParty?.state || ""),
+      pincode: String(storedMeta?.pincode || matchedParty?.pincode || ""),
+      address: String(storedMeta?.address || matchedParty?.address || ""),
+      itemName: "",
+      quantity: 0,
+      rate: 0,
+      gstRate: 0,
+      discountType: "percentage",
+      discountValue: 0,
+    });
+
+    setTimeout(() => customerInputRef.current?.focus(), 100);
+  };
+
+  const applySourceInvoiceSelection = (entry: any) => {
+    const snapshot = buildOriginalSnapshot(
+      entry,
+      cfg.sourceEndpoint || cfg.endpoint,
+    );
+
+    if (!snapshot.invoiceNo) {
+      alert("Original invoice could not be loaded.");
+      return;
+    }
+
+    setOriginalSnapshot(snapshot);
+    setInvoiceItems(snapshot.items.filter((line) => line.itemName));
+    setBarcode("");
+    setCustomerSearch(snapshot.partyName);
+    setIsMasterItem(false);
+    setPaymentSplit({ cash: "", bank: "" });
+    setOriginalInvoiceDropdownOpen(false);
+    setOriginalInvoiceHighlightIdx(0);
+    pendingScannedBarcodeRef.current = "";
+    setNewItemModalTitle("Add New Item");
+
+    if (cfg.isAdjustment) {
+      setEditingId(null);
+      setEditSourceInvoiceNo("");
+      setForm({
+        invoiceNo: "",
+        returnNo: "",
+        noteNo: "",
+        originalInvoiceNo: snapshot.invoiceNo,
+        partyName: cfg.partyKey === "partyName" ? snapshot.partyName : "",
+        supplierName:
+          cfg.partyKey === "supplierName" ? snapshot.partyName : "",
+        dueDate: snapshot.dueDate || getTodayDateInput(),
+        gstNo:
+          snapshot.gstNo || (cfg.partyKey === "partyName" ? "B2C" : ""),
+        phone: snapshot.phone || "",
+        state: snapshot.state || "",
+        pincode: snapshot.pincode || "",
+        address: snapshot.address || "",
+        itemName: "",
+        quantity: 0,
+        rate: 0,
+        gstRate: 0,
+        discountType: "percentage",
+        discountValue: 0,
+      });
+
+      focusDueDateField();
+      return;
+    }
+
+    setForm((prev: any) => ({
+      ...prev,
+      originalInvoiceNo: snapshot.invoiceNo,
+      partyName: cfg.partyKey === "partyName" ? snapshot.partyName : prev.partyName,
+      supplierName:
+        cfg.partyKey === "supplierName" ? snapshot.partyName : prev.supplierName,
+      dueDate: snapshot.dueDate || getTodayDateInput(),
+      gstNo:
+        snapshot.gstNo || (cfg.partyKey === "partyName" ? "B2C" : ""),
+      phone: snapshot.phone || "",
+      state: snapshot.state || "",
+      pincode: snapshot.pincode || "",
+      address: snapshot.address || "",
+      itemName: "",
+      quantity: 0,
+      rate: 0,
+      gstRate: 0,
+      discountType: "percentage",
+      discountValue: 0,
+    }));
+
+    focusDueDateField();
+  };
+
   const buildPayload = (dueDateOverride?: string) => {
-    const noValue = form[cfg.noKey] || autoNo;
+    const noValue = cfg.isAdjustment
+      ? String(form[cfg.noKey] || "").trim()
+      : form[cfg.noKey] || autoNo;
     const lines = activeLines.length > 0 ? activeLines : [currentLine].filter((x) => x.itemName);
     const first = lines[0] || currentLine;
 
@@ -1154,32 +1794,65 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       igst,
       amountBeforeRound,
       roundOff,
-      totalAmount,
+      totalAmount: cfg.isAdjustment ? adjustmentAmount : totalAmount,
       grandTotal: totalAmount,
       items: lines,
       subtotalAmount,
       discountType: form.discountType || "percentage",
       discountValue: Number(form.discountValue || 0),
       discountAmount,
-      paymentStatus: cfg.isIncoming ? "not_received" : "not_paid",
     };
 
     if (cfg.isReturn) {
-      payload.originalInvoiceNo = form.originalInvoiceNo || "-";
+      payload.originalInvoiceNo =
+        form.originalInvoiceNo || originalSnapshot?.invoiceNo || "-";
     }
+
+    if (cfg.isAdjustment) {
+      payload.originalInvoiceNo =
+        form.originalInvoiceNo || originalSnapshot?.invoiceNo || "-";
+      payload.originalItems = originalSnapshot?.items || [];
+      payload.originalTotalAmount = originalInvoiceTotal;
+      payload.adjustedTotalAmount = totalAmount;
+      payload.adjustmentAmount = adjustmentDifference;
+      payload.adjustmentType =
+        adjustmentDifference < 0
+          ? "CREDIT"
+          : adjustmentDifference > 0
+          ? "DEBIT"
+          : "";
+    }
+
+    const paymentFlow = getPaymentFlow(payload);
+    payload.paymentStatus = paymentFlow.isIncoming
+      ? "not_received"
+      : "not_paid";
 
     return payload;
   };
 
   const saveInvoiceMeta = (payload: any, id?: any) => {
-    const invoiceNo = payload.invoiceNo || payload.returnNo || form[cfg.noKey] || autoNo;
+    const invoiceNo = resolveDocumentNo(payload) || form[cfg.noKey] || autoNo;
     const key = `${cfg.endpoint}:${id || editingId || invoiceNo}`;
     const old = JSON.parse(localStorage.getItem("invoiceInvoiceMeta") || "{}");
 
     old[key] = {
       invoiceNo,
+      originalInvoiceNo: payload.originalInvoiceNo || form.originalInvoiceNo || "",
+      gstNo: payload.gstNo || form.gstNo || "",
       dueDate: payload.dueDate || form.dueDate || "",
+      phone: payload.phone || form.phone || "",
+      state: payload.state || form.state || "",
+      pincode: payload.pincode || form.pincode || "",
+      address: payload.address || form.address || "",
+      partyName: payload.partyName || form.partyName || "",
+      supplierName: payload.supplierName || form.supplierName || "",
       items: payload.items || activeLines,
+      originalItems: payload.originalItems || originalSnapshot?.items || [],
+      originalTotalAmount:
+        payload.originalTotalAmount || originalSnapshot?.totalAmount || 0,
+      adjustmentAmount: payload.adjustmentAmount || 0,
+      adjustmentType: payload.adjustmentType || "",
       subtotalAmount,
       discountType: form.discountType || "percentage",
       discountValue: Number(form.discountValue || 0),
@@ -1190,12 +1863,19 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       igst,
       amountBeforeRound,
       roundOff,
-      totalAmount,
+      totalAmount: cfg.isAdjustment ? adjustmentAmount : totalAmount,
       grandTotal: totalAmount,
       updatedAt: new Date().toISOString(),
     };
 
     old[`${cfg.endpoint}:${invoiceNo}`] = old[key];
+    if (
+      editSourceInvoiceNo &&
+      invoiceNo &&
+      editSourceInvoiceNo !== invoiceNo
+    ) {
+      delete old[`${cfg.endpoint}:${editSourceInvoiceNo}`];
+    }
     localStorage.setItem("invoiceInvoiceMeta", JSON.stringify(old));
   };
 
@@ -1205,18 +1885,24 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     pendingAmount: number,
     total: number,
     settledAmount = 0,
-    dueDate = form.dueDate || ""
+    dueDate = form.dueDate || "",
+    previousInvoiceNo = "",
+    paymentFlow = getPaymentFlow(),
   ) => {
-    const key = cfg.isIncoming ? "receivableMaster" : "paymentMaster";
+    const key = paymentFlow.isIncoming ? "receivableMaster" : "paymentMaster";
     const old = getStorageArray(key);
-    const withoutCurrent = old.filter((x: any) => x.invoiceNo !== invoiceNo);
+    const withoutCurrent = old.filter(
+      (x: any) =>
+        x.invoiceNo !== invoiceNo &&
+        (!previousInvoiceNo || x.invoiceNo !== previousInvoiceNo),
+    );
 
     if (pendingAmount <= 0) {
       localStorage.setItem(key, JSON.stringify(withoutCurrent));
       return;
     }
 
-    const row = cfg.isIncoming
+    const row = paymentFlow.isIncoming
       ? {
           id: Date.now(),
           date: new Date().toISOString().slice(0, 10),
@@ -1231,9 +1917,13 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
           balance: pendingAmount,
           pendingAmount,
           dueDate,
-          status: getPaymentStatusLabel(pendingAmount, settledAmount),
-          source: cfg.title,
-          remarks: cfg.title,
+          status: getPaymentStatusLabel(
+            pendingAmount,
+            settledAmount,
+            paymentFlow.isIncoming,
+          ),
+          source: paymentFlow.title,
+          remarks: paymentFlow.title,
         }
       : {
           id: Date.now(),
@@ -1248,13 +1938,165 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
           dueDate,
           paymentMode: pendingAmount > 0 ? "Pending" : "Settled",
           referenceNo: invoiceNo,
-          status: getPaymentStatusLabel(pendingAmount, settledAmount),
-          source: cfg.title,
-          remarks: cfg.title,
+          status: getPaymentStatusLabel(
+            pendingAmount,
+            settledAmount,
+            paymentFlow.isIncoming,
+          ),
+          source: paymentFlow.title,
+          remarks: paymentFlow.title,
         };
 
     localStorage.setItem(key, JSON.stringify([row, ...withoutCurrent]));
   };
+
+  const syncLocalInvoiceStateAfterEdit = (
+    previousInvoiceNo: string,
+    nextInvoiceNo: string,
+    partyName: string,
+    dueDate: string,
+    nextTotalAmount: number,
+    paymentFlow = getPaymentFlow(),
+  ) => {
+    const nextKey = `${cfg.endpoint}:${nextInvoiceNo}`;
+    const previousKey = `${cfg.endpoint}:${previousInvoiceNo}`;
+    const paymentStore = JSON.parse(
+      localStorage.getItem("invoicePaymentStatus") || "{}",
+    );
+    const existingStatus = paymentStore[nextKey] || paymentStore[previousKey] || {};
+    const settledAmount = Number(
+      existingStatus.paidAmount || existingStatus.receivedAmount || 0,
+    );
+    const pendingAmount = Math.max(nextTotalAmount - settledAmount, 0);
+
+    if (
+      previousInvoiceNo &&
+      nextInvoiceNo &&
+      previousInvoiceNo !== nextInvoiceNo
+    ) {
+      delete paymentStore[previousKey];
+    }
+
+    paymentStore[nextKey] = {
+      ...existingStatus,
+      paidAmount: settledAmount,
+      receivedAmount: settledAmount,
+      pendingAmount,
+      totalAmount: nextTotalAmount,
+      status: getPaymentStatusLabel(
+        pendingAmount,
+        settledAmount,
+        paymentFlow.isIncoming,
+      ),
+      updatedAt: new Date().toISOString(),
+    };
+
+    localStorage.setItem("invoicePaymentStatus", JSON.stringify(paymentStore));
+    upsertPendingMaster(
+      nextInvoiceNo,
+      partyName,
+      pendingAmount,
+      nextTotalAmount,
+      settledAmount,
+      dueDate,
+      previousInvoiceNo,
+      paymentFlow,
+    );
+    renameInvoiceReferencesInStorage("cashMaster", previousInvoiceNo, nextInvoiceNo);
+    renameInvoiceReferencesInStorage("bankMaster", previousInvoiceNo, nextInvoiceNo);
+  };
+
+  useEffect(() => {
+    if (!editIdParam) {
+      return;
+    }
+
+    const recordId = Number(editIdParam);
+
+    if (!Number.isFinite(recordId) || recordId <= 0) {
+      alert("Invalid invoice edit link.");
+      setEditIdParam("");
+      router.replace(`/${cfg.endpoint}`);
+      return;
+    }
+
+    if (!entries.length) {
+      return;
+    }
+
+    if (!cfg.isAdjustment) {
+      let invoiceEditEnabled = false;
+      try {
+        const savedConfig = JSON.parse(
+          localStorage.getItem("invoiceEditConfig") || "{}",
+        );
+        invoiceEditEnabled = Boolean(savedConfig?.enabled);
+      } catch {
+        invoiceEditEnabled = false;
+      }
+
+      if (!invoiceEditEnabled) {
+        alert("Enable invoice edit option in settings first.");
+        setEditIdParam("");
+        router.replace("/all-invoice-report");
+        return;
+      }
+    }
+
+    const entry = entries.find((row: any) => Number(row.id) === recordId);
+
+    if (!entry) {
+      alert("Invoice record not found for editing.");
+      setEditIdParam("");
+      router.replace(`/${cfg.endpoint}`);
+      return;
+    }
+
+    loadSavedInvoiceForEdit(entry);
+    setEditIdParam("");
+    router.replace(`/${cfg.endpoint}`);
+  }, [editIdParam, entries, cfg.endpoint, cfg.isAdjustment, router]);
+
+  useEffect(() => {
+    if (!cfg.sourceEndpoint || !sourceIdParam || editIdParam) {
+      return;
+    }
+
+    const recordId = Number(sourceIdParam);
+
+    if (!Number.isFinite(recordId) || recordId <= 0) {
+      alert("Invalid source invoice link.");
+      setSourceIdParam("");
+      router.replace(`/${cfg.endpoint}`);
+      return;
+    }
+
+    if (!sourceEntries.length) {
+      return;
+    }
+
+    const sourceEntry = sourceEntries.find(
+      (row: any) => Number(row.id) === recordId,
+    );
+
+    if (!sourceEntry) {
+      alert("Original invoice not found.");
+      setSourceIdParam("");
+      router.replace(`/${cfg.endpoint}`);
+      return;
+    }
+
+    applySourceInvoiceSelection(sourceEntry);
+    setSourceIdParam("");
+    router.replace(`/${cfg.endpoint}`);
+  }, [
+    cfg.endpoint,
+    cfg.sourceEndpoint,
+    editIdParam,
+    router,
+    sourceEntries,
+    sourceIdParam,
+  ]);
 
   const saveEntry = async () => {
     if (!form[cfg.partyKey]) {
@@ -1276,8 +2118,31 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
         ? getTodayDateInput()
         : committedDueDate || form.dueDate || getTodayDateInput();
 
+    if (cfg.isAdjustment) {
+      if (!originalSnapshot?.invoiceNo || (originalSnapshot.items || []).length === 0) {
+        alert(
+          "Open this note from the invoice report so the original invoice details load first.",
+        );
+        return;
+      }
+
+      if (adjustmentDifference === 0) {
+        alert(
+          "Please change quantity, rate, discount or items first. No credit/debit difference found yet.",
+        );
+        return;
+      }
+    }
+
+    const isEditing = editingId !== null;
+    const previousInvoiceNo = resolveDocumentNo({
+      noteNo: editSourceInvoiceNo || form.noteNo,
+      invoiceNo: form.invoiceNo,
+      returnNo: form.returnNo,
+    });
     const payload = buildPayload(resolvedDueDate);
-    const url = editingId ? `${API}/${cfg.endpoint}/${editingId}` : `${API}/${cfg.endpoint}`;
+    const apiPath = editingId ? `/${cfg.endpoint}/${editingId}` : `/${cfg.endpoint}`;
+    const url = `${API}${apiPath}`;
     const method = editingId ? "PUT" : "POST";
 
     if (type === "sales") {
@@ -1297,7 +2162,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       }
     }
 
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1305,22 +2170,73 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
     if (!res.ok) {
       const msg = await res.text().catch(() => "");
-      alert(`Save failed. ${msg || "Check backend terminal."}`);
-      return;
+
+      if (shouldRetryWithDirectBackend(res, msg)) {
+        const fallbackRes = await fetch(getDirectApiUrl(apiPath), {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(() => null);
+
+        if (!fallbackRes || !fallbackRes.ok) {
+          const fallbackMsg = fallbackRes
+            ? await fallbackRes.text().catch(() => "")
+            : "";
+          alert(`Save failed. ${fallbackMsg || msg || "Check backend terminal."}`);
+          return;
+        }
+
+        res = fallbackRes;
+      } else {
+        alert(`Save failed. ${msg || "Check backend terminal."}`);
+        return;
+      }
     }
 
     const saved = await res.json().catch(() => ({}));
-    saveInvoiceMeta(payload, saved?.id || editingId);
+    const savedRecord = saved?.data || saved || {};
+    const persistedPayload = cfg.isAdjustment
+      ? {
+          ...payload,
+          noteNo: savedRecord?.noteNo || payload.noteNo,
+          adjustmentType:
+            savedRecord?.noteType || payload.adjustmentType || "",
+        }
+      : payload;
+    const paymentFlow = getPaymentFlow(persistedPayload);
+    saveInvoiceMeta(persistedPayload, savedRecord?.id || editingId);
 
-    const invoiceNo = payload.invoiceNo || payload.returnNo || form[cfg.noKey] || autoNo;
+    const invoiceNo =
+      resolveDocumentNo(persistedPayload) || form[cfg.noKey] || autoNo;
+
+    if (isEditing) {
+      syncLocalInvoiceStateAfterEdit(
+        previousInvoiceNo,
+        invoiceNo,
+        form[cfg.partyKey] || "Party",
+        payload.dueDate || resolvedDueDate,
+        cfg.isAdjustment ? adjustmentAmount : totalAmount,
+        paymentFlow,
+      );
+      alert(
+        `${paymentFlow.title} ${cfg.isAdjustment ? "updated" : "updated successfully."}`,
+      );
+      clearForm();
+      loadAll();
+      return;
+    }
+
     setSaveConfirmData({
-      total: totalAmount,
+      total: cfg.isAdjustment ? adjustmentAmount : totalAmount,
       invoiceNo,
       partyName: form[cfg.partyKey] || "Party",
-      payload,
+      payload: persistedPayload,
     });
     setPaymentSplit(
-      getDefaultPaymentSplitForParty(form[cfg.partyKey] || "Party", totalAmount)
+      getDefaultPaymentSplitForParty(
+        form[cfg.partyKey] || "Party",
+        cfg.isAdjustment ? adjustmentAmount : totalAmount,
+      )
     );
     setShowSaveConfirm(true);
     loadAll();
@@ -1333,6 +2249,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const handleSaveConfirm = (shouldPrint: boolean) => {
     const data = saveConfirmData;
     if (!data) return;
+    const paymentFlow = getPaymentFlow(data.payload);
 
     const paymentTotals = getPaymentSplitTotals(data.total);
     if (paymentTotals.isOverLimit) {
@@ -1341,10 +2258,20 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     }
 
     if (paymentTotals.cashAmount > 0) {
-      postCashEntry(data.invoiceNo, data.partyName, paymentTotals.cashAmount);
+      postCashEntry(
+        data.invoiceNo,
+        data.partyName,
+        paymentTotals.cashAmount,
+        paymentFlow,
+      );
     }
     if (paymentTotals.bankAmount > 0) {
-      postBankEntry(data.invoiceNo, data.partyName, paymentTotals.bankAmount);
+      postBankEntry(
+        data.invoiceNo,
+        data.partyName,
+        paymentTotals.bankAmount,
+        paymentFlow,
+      );
     }
 
     upsertPendingMaster(
@@ -1353,7 +2280,9 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       paymentTotals.pendingAmount,
       data.total,
       paymentTotals.settledAmount,
-      data.payload?.dueDate || form.dueDate || ""
+      data.payload?.dueDate || form.dueDate || "",
+      "",
+      paymentFlow,
     );
 
     const store = JSON.parse(localStorage.getItem("invoicePaymentStatus") || "{}");
@@ -1364,7 +2293,11 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       bankAmount: paymentTotals.bankAmount,
       pendingAmount: paymentTotals.pendingAmount,
       totalAmount: data.total,
-      status: getPaymentStatusLabel(paymentTotals.pendingAmount, paymentTotals.settledAmount),
+      status: getPaymentStatusLabel(
+        paymentTotals.pendingAmount,
+        paymentTotals.settledAmount,
+        paymentFlow.isIncoming,
+      ),
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem("invoicePaymentStatus", JSON.stringify(store));
@@ -1384,7 +2317,11 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
               bankAmount: paymentTotals.bankAmount,
               settledAmount: paymentTotals.settledAmount,
               pendingAmount: paymentTotals.pendingAmount,
-              status: getPaymentStatusLabel(paymentTotals.pendingAmount, paymentTotals.settledAmount),
+              status: getPaymentStatusLabel(
+                paymentTotals.pendingAmount,
+                paymentTotals.settledAmount,
+                paymentFlow.isIncoming,
+              ),
             },
           }),
         150
@@ -1417,21 +2354,23 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
       const data = response.extracted || {};
       const itemName = data.itemName || data.item || data.description || "";
-      const selectedItem = items.find(
-        (x: any) => String(x.itemName).toLowerCase() === String(itemName).toLowerCase()
+      const selectedItem = itemOptions.find(
+        (x: any) =>
+          normalizeItemNameKey(x.itemName) === normalizeItemNameKey(itemName),
       );
 
       setForm((prev: any) => ({
         ...prev,
         invoiceNo: data.invoiceNo || prev.invoiceNo,
         returnNo: data.returnNo || prev.returnNo,
+        noteNo: data.noteNo || prev.noteNo,
         originalInvoiceNo: data.originalInvoiceNo || prev.originalInvoiceNo,
         supplierName:
-          type === "purchase" || type === "purchase-return"
+          isPurchaseSide
             ? data.supplierName || data.partyName || prev.supplierName
             : prev.supplierName,
         partyName:
-          type === "sales" || type === "sales-return"
+          isSalesSide
             ? data.partyName || prev.partyName
             : prev.partyName,
         gstNo: data.gstNo || data.gstNumber || data.gstin || prev.gstNo,
@@ -1534,7 +2473,12 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     );
   };
 
-  const postCashEntry = (invoiceNo: string, partyName: string, amount: number) => {
+  const postCashEntry = (
+    invoiceNo: string,
+    partyName: string,
+    amount: number,
+    paymentFlow = getPaymentFlow(),
+  ) => {
     if (amount <= 0) return;
     const oldCash = getStorageArray("cashMaster");
     localStorage.setItem(
@@ -1545,11 +2489,11 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
           date: new Date().toISOString().slice(0, 10),
           invoiceNo,
           amount,
-          type: cfg.isIncoming ? "credit" : "debit",
+          type: paymentFlow.isIncoming ? "credit" : "debit",
           partyName,
           mode: DEFAULT_CASH_ACCOUNT,
           referenceNo: invoiceNo,
-          remarks: cfg.title,
+          remarks: paymentFlow.title,
         },
         ...oldCash,
       ])
@@ -1557,15 +2501,17 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   };
 
   const handlePaymentUpdate = () => {
-    if (!totalAmount || totalAmount <= 0) {
+    const effectiveTotal = cfg.isAdjustment ? adjustmentAmount : totalAmount;
+    if (!effectiveTotal || effectiveTotal <= 0) {
       alert("Amount is zero. Please enter invoice items first.");
       return;
     }
 
-    const invoiceNo = form[cfg.noKey] || autoNo;
+    const invoiceNo = resolveDocumentNo(form) || autoNo;
     const partyName = form[cfg.partyKey] || "Party";
-    const label = cfg.isIncoming ? "received" : "paid";
-    const entered = window.prompt(`Enter amount ${label}:`, String(totalAmount));
+    const paymentFlow = getPaymentFlow(buildPayload(form.dueDate || getTodayDateInput()));
+    const label = paymentFlow.isIncoming ? "received" : "paid";
+    const entered = window.prompt(`Enter amount ${label}:`, String(effectiveTotal));
 
     if (entered === null) return;
 
@@ -1576,23 +2522,32 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       return;
     }
 
-    if (amountNow > totalAmount) {
-      alert(`Amount cannot be more than ${formatMoney(totalAmount)}.`);
+    if (amountNow > effectiveTotal) {
+      alert(`Amount cannot be more than ${formatMoney(effectiveTotal)}.`);
       return;
     }
 
-    const pendingAmount = Math.max(totalAmount - amountNow, 0);
-    postCashEntry(invoiceNo, partyName, amountNow);
-    upsertPendingMaster(invoiceNo, partyName, pendingAmount, totalAmount, amountNow);
+    const pendingAmount = Math.max(effectiveTotal - amountNow, 0);
+    postCashEntry(invoiceNo, partyName, amountNow, paymentFlow);
+    upsertPendingMaster(
+      invoiceNo,
+      partyName,
+      pendingAmount,
+      effectiveTotal,
+      amountNow,
+      form.dueDate || "",
+      "",
+      paymentFlow,
+    );
 
     const store = JSON.parse(localStorage.getItem("invoicePaymentStatus") || "{}");
     store[`${cfg.endpoint}:${invoiceNo}`] = {
       paidAmount: amountNow,
-      totalAmount,
+      totalAmount: effectiveTotal,
       status:
         pendingAmount <= 0
-          ? cfg.isIncoming ? "Received" : "Paid"
-          : cfg.isIncoming ? "Partial Received" : "Partial Paid",
+          ? paymentFlow.isIncoming ? "Received" : "Paid"
+          : paymentFlow.isIncoming ? "Partial Received" : "Partial Paid",
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem("invoicePaymentStatus", JSON.stringify(store));
@@ -1601,7 +2556,12 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     setShowPaymentOptions(false);
   };
 
-  const postBankEntry = (invoiceNo: string, partyName: string, amount: number) => {
+  const postBankEntry = (
+    invoiceNo: string,
+    partyName: string,
+    amount: number,
+    paymentFlow = getPaymentFlow(),
+  ) => {
     if (amount <= 0) return;
     const oldBank = getStorageArray("bankMaster");
     localStorage.setItem(
@@ -1612,12 +2572,12 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
           date: new Date().toISOString().slice(0, 10),
           invoiceNo,
           amount,
-          type: cfg.isIncoming ? "credit" : "debit",
+          type: paymentFlow.isIncoming ? "credit" : "debit",
           partyName,
           mode: DEFAULT_BANK_ACCOUNT,
           referenceNo: invoiceNo,
-          remarks: cfg.title,
-          source: cfg.title,
+          remarks: paymentFlow.title,
+          source: paymentFlow.title,
         },
         ...oldBank,
       ])
@@ -1625,13 +2585,22 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   };
 
   const printEntry = (entry?: any) => {
-    const savedCompany = JSON.parse(localStorage.getItem("companySettings") || "{}");
+    const savedCompanySettings = JSON.parse(
+      localStorage.getItem("companySettings") || "{}",
+    );
+    const savedCompanyProfile = JSON.parse(
+      localStorage.getItem("companyProfile") || "{}",
+    );
+    const savedCompany = {
+      ...savedCompanySettings,
+      ...savedCompanyProfile,
+    };
     const companyName = savedCompany?.companyName || company?.companyName || "SJQD SOFTWARE";
     const companyAddress = savedCompany?.address || company?.address || "Company Address";
     const companyGST = savedCompany?.gstNumber || company?.gstNumber || "N/A";
     const companyLogo = savedCompany?.logo || company?.logo || "";
     const signatureImage = savedCompany?.signatureImage || "";
-    const invoiceNo = entry?.invoiceNo || entry?.returnNo || form[cfg.noKey] || autoNo;
+    const invoiceNo = resolveDocumentNo(entry) || resolveDocumentNo(form) || autoNo;
     const party = entry?.partyName || entry?.supplierName || form[cfg.partyKey] || "Party";
     const lines = entry?.items || activeLines;
     const invoiceDate = entry?.date
@@ -1643,8 +2612,25 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     const printPincode = entry?.pincode || form.pincode || "";
     const printState = entry?.state || form.state || "";
     const paymentSummary = entry?.paymentSummary || null;
-    const paymentLabel = cfg.isIncoming ? "Received" : "Paid";
-    const balanceLabel = cfg.isIncoming ? "Receivable" : "Payable";
+    const paymentFlow = getPaymentFlow(entry);
+    const paymentLabel = paymentFlow.isIncoming ? "Received" : "Paid";
+    const balanceLabel = paymentFlow.isIncoming ? "Receivable" : "Payable";
+    const printOriginalTotal = Number(
+      entry?.originalTotalAmount ?? originalSnapshot?.totalAmount ?? 0,
+    );
+    const printAdjustedTotal = Number(
+      entry?.adjustedTotalAmount ?? entry?.grandTotal ?? totalAmount,
+    );
+    const rawAdjustmentAmount = Number(
+      entry?.adjustmentAmount ?? printAdjustedTotal - printOriginalTotal,
+    );
+    const printAdjustmentType =
+      rawAdjustmentAmount < 0
+        ? "Credit Note"
+        : rawAdjustmentAmount > 0
+        ? "Debit Note"
+        : "Adjustment Note";
+    const printAdjustmentAmount = Math.abs(rawAdjustmentAmount);
 
     const printSubtotal =
       Number(entry?.subtotalAmount) ||
@@ -1753,10 +2739,11 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
               </div>
             </div>
             <div class="invoice-box">
-              <h2>${cfg.title}</h2>
-              <div><b>Invoice No:</b> ${invoiceNo}</div>
+              <h2>${cfg.isAdjustment ? printAdjustmentType : cfg.title}</h2>
+              <div><b>${cfg.isAdjustment ? "Note No" : "Invoice No"}:</b> ${invoiceNo}</div>
               <div><b>Date:</b> ${invoiceDate}</div>
-              ${cfg.isReturn ? `<div><b>Original Invoice:</b> ${entry?.originalInvoiceNo || form.originalInvoiceNo || "-"}</div>` : ""}
+              ${cfg.showOriginalInvoice ? `<div><b>Original Invoice:</b> ${entry?.originalInvoiceNo || form.originalInvoiceNo || originalSnapshot?.invoiceNo || "-"}</div>` : ""}
+              ${cfg.isAdjustment ? `<div><b>Original Total:</b> ${formatMoney(printOriginalTotal)}</div><div><b>Revised Total:</b> ${formatMoney(printAdjustedTotal)}</div>` : ""}
             </div>
           </div>
 
@@ -1808,7 +2795,8 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                 <div class="sumrow"><span>Amount Before Round Off</span><b>${formatMoneyExact(printAmountBeforeRound)}</b></div>
                 <div class="sumrow"><span>Round Off</span><b>${printRoundOff >= 0 ? "+" : ""}${formatMoney(printRoundOff)}</b></div>
                 ${paymentRows}
-                <div class="grand"><span>Grand Total</span><span>${formatMoney(printTotal)}</span></div>
+                ${cfg.isAdjustment ? `<div class="sumrow"><span>Original Invoice Total</span><b>${formatMoney(printOriginalTotal)}</b></div><div class="sumrow"><span>Revised Invoice Total</span><b>${formatMoney(printAdjustedTotal)}</b></div>` : ""}
+                <div class="grand"><span>${cfg.isAdjustment ? printAdjustmentType : "Grand Total"}</span><span>${formatMoney(cfg.isAdjustment ? printAdjustmentAmount : printTotal)}</span></div>
               </div>
 
               <div class="signature-box">
@@ -1851,14 +2839,55 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     });
   }, [customerOptions, customerSearch]);
 
+  const sourceInvoiceOptions = useMemo(() => {
+    const uniqueInvoices = new Map<string, any>();
+
+    (Array.isArray(sourceEntries) ? sourceEntries : []).forEach((entry: any) => {
+      const invoiceNo = resolveDocumentNo(entry);
+      if (!invoiceNo || uniqueInvoices.has(invoiceNo)) return;
+      uniqueInvoices.set(invoiceNo, {
+        ...entry,
+        invoiceNo,
+        partyName: String(entry?.partyName || entry?.supplierName || "").trim(),
+        gstNo: String(entry?.gstNo || "").trim(),
+      });
+    });
+
+    return Array.from(uniqueInvoices.values()).sort((a, b) =>
+      String(a.invoiceNo || "").localeCompare(String(b.invoiceNo || ""), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
+  }, [sourceEntries]);
+
+  const filteredSourceInvoiceOptions = useMemo(() => {
+    const query = String(form.originalInvoiceNo || "")
+      .trim()
+      .toLowerCase();
+
+    if (!query) return sourceInvoiceOptions;
+
+    return sourceInvoiceOptions.filter((entry) => {
+      const invoiceNo = String(entry.invoiceNo || "").toLowerCase();
+      const partyName = String(entry.partyName || "").toLowerCase();
+      const gstNo = String(entry.gstNo || "").toLowerCase();
+      return (
+        invoiceNo.includes(query) ||
+        partyName.includes(query) ||
+        gstNo.includes(query)
+      );
+    });
+  }, [form.originalInvoiceNo, sourceInvoiceOptions]);
+
   const filteredItems = useMemo(() => {
     const q = itemSearch.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((x: any) =>
+    if (!q) return itemOptions;
+    return itemOptions.filter((x: any) =>
       String(x.itemName || "").toLowerCase().includes(q) ||
       String(x.barcode || "").toLowerCase().includes(q)
     );
-  }, [items, itemSearch]);
+  }, [itemOptions, itemSearch]);
 
   const handleTableKeyNav = (e: React.KeyboardEvent, line: InvoiceLine, idx: number) => {
     if (e.key === "ArrowUp" && idx > 0) {
@@ -1875,6 +2904,9 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const saveConfirmSplit = saveConfirmData
     ? getPaymentSplitTotals(saveConfirmData.total)
     : null;
+  const saveConfirmFlow = saveConfirmData
+    ? getPaymentFlow(saveConfirmData.payload)
+    : getPaymentFlow();
 
   const pageStyle = { ...page, padding: isMobile ? 14 : isTablet ? 18 : 28 };
   const shortcutBarStyle = {
@@ -1916,6 +2948,32 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     textAlign: isMobile ? ("left" as const) : ("right" as const),
     gridColumn: isMobile ? "auto" : isTablet ? "1 / -1" : "auto",
   };
+  const adjustmentPreviewCard = {
+    marginBottom: 18,
+    borderRadius: 18,
+    border: "1px solid rgba(180,83,9,0.22)",
+    background:
+      "linear-gradient(135deg, rgba(255,248,220,0.96), rgba(253,230,138,0.92))",
+    boxShadow: "0 18px 40px rgba(180,83,9,0.12)",
+    padding: isMobile ? "14px 16px" : "16px 20px",
+  } satisfies CSSProperties;
+  const adjustmentPreviewValue = {
+    fontSize: isMobile ? 22 : 26,
+    fontWeight: 900,
+    color: "#7c2d12",
+  } satisfies CSSProperties;
+  const adjustmentPreviewMeta = {
+    marginTop: 6,
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#92400e",
+  } satisfies CSSProperties;
+  const adjustmentPreviewHint = {
+    marginTop: 8,
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "#78350f",
+  } satisfies CSSProperties;
   const topGridStyle = {
     ...topGrid,
     gridTemplateColumns: isMobile
@@ -2011,26 +3069,42 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
             <div style={logoCircle}>{prefix}</div>
             <div>
               <h2 style={companyName}>{company.companyName || "SJQD SOFTWARE"}</h2>
-              <p style={autoText}>Auto Number: {autoNo}</p>
+              <p style={autoText}>Auto Number: {resolveDocumentNo(form) || autoNo}</p>
             </div>
             <div style={statusBoxStyle}>
-              <span style={statusLabel}>Grand Total</span>
-              <b style={statusAmount}>{formatMoney(totalAmount)}</b>
+              <span style={statusLabel}>{cfg.amountLabel || "Grand Total"}</span>
+              <b style={statusAmount}>
+                {formatMoney(cfg.isAdjustment ? adjustmentAmount : totalAmount)}
+              </b>
             </div>
           </div>
 
           <div style={sectionTitle}>Invoice Details</div>
 
-          <div style={cfg.isReturn ? returnTopGridStyle : topGridStyle}>
+          {cfg.isAdjustment && (
+            <div style={adjustmentPreviewCard}>
+              <div style={adjustmentPreviewValue}>
+                {adjustmentNoteLabel}
+              </div>
+              <div style={adjustmentPreviewMeta}>
+                Original Total: {formatMoney(originalInvoiceTotal)} | Revised Total: {formatMoney(totalAmount)}
+              </div>
+              <div style={adjustmentPreviewHint}>
+                System automatically saves this as {adjustmentNoteLabel} based on the change from the original invoice.
+              </div>
+            </div>
+          )}
+
+          <div style={cfg.showOriginalInvoice ? returnTopGridStyle : topGridStyle}>
             <Field
-              label={cfg.isReturn ? "Return Number" : "Invoice Number"}
+              label={cfg.numberLabel || (cfg.isReturn ? "Return Number" : "Invoice Number")}
               value={form[cfg.noKey]}
               placeholder={`Leave blank for auto: ${autoNo}`}
               onChange={(v: string) => update(cfg.noKey, v)}
               onKeyDown={(e: any) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  if (cfg.isReturn) {
+                  if (cfg.showOriginalInvoice) {
                     originalInvoiceRef.current?.focus();
                   } else {
                     focusPartyLookup();
@@ -2039,20 +3113,117 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
               }}
             />
 
-            {cfg.isReturn && (
-              <Field
-                inputRef={originalInvoiceRef}
-                label="Original Invoice Number"
-                value={form.originalInvoiceNo}
-                placeholder="Original invoice number"
-                onChange={(v: string) => update("originalInvoiceNo", v)}
-                onKeyDown={(e: any) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    focusPartyLookup();
-                  }
-                }}
-              />
+            {cfg.showOriginalInvoice && (
+              <label style={fieldWrap}>
+                <span style={fieldLabel}>Original Invoice Number</span>
+                <div ref={originalInvoiceDropdownRef} style={{ position: "relative" }}>
+                  <input
+                    ref={originalInvoiceRef}
+                    style={fieldInput}
+                    value={form.originalInvoiceNo ?? ""}
+                    placeholder={
+                      cfg.isAdjustment && originalSnapshot?.invoiceNo
+                        ? `Leave blank for auto: ${originalSnapshot.invoiceNo}`
+                        : "Select original invoice number"
+                    }
+                    onChange={(e) => {
+                      update("originalInvoiceNo", e.target.value);
+                      setOriginalInvoiceHighlightIdx(0);
+                      setOriginalInvoiceDropdownOpen(true);
+                    }}
+                    onFocus={() => setOriginalInvoiceDropdownOpen(true)}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setOriginalInvoiceDropdownOpen(true);
+                        setOriginalInvoiceHighlightIdx((idx) =>
+                          Math.min(
+                            idx + 1,
+                            Math.max(filteredSourceInvoiceOptions.length - 1, 0),
+                          ),
+                        );
+                        return;
+                      }
+
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setOriginalInvoiceHighlightIdx((idx) => Math.max(idx - 1, 0));
+                        return;
+                      }
+
+                      if (e.key === "Escape") {
+                        setOriginalInvoiceDropdownOpen(false);
+                        return;
+                      }
+
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        const selectedEntry =
+                          filteredSourceInvoiceOptions[originalInvoiceHighlightIdx];
+
+                        if (selectedEntry) {
+                          applySourceInvoiceSelection(selectedEntry);
+                        } else {
+                          setOriginalInvoiceDropdownOpen(false);
+                          focusPartyLookup();
+                        }
+                      }
+                    }}
+                  />
+
+                  {originalInvoiceDropdownOpen && (
+                    <div style={itemDropdownPanel}>
+                      <div style={itemDropdownList}>
+                        {filteredSourceInvoiceOptions.length === 0 && (
+                          <div
+                            style={{
+                              ...itemDropdownOption,
+                              color: "#92400e",
+                              fontStyle: "italic",
+                            }}
+                          >
+                            No invoice numbers found.
+                          </div>
+                        )}
+
+                        {filteredSourceInvoiceOptions.map((entry, idx) => (
+                          <div
+                            key={`${entry.invoiceNo}-${entry.id || idx}`}
+                            style={{
+                              ...itemDropdownOption,
+                              background:
+                                idx === originalInvoiceHighlightIdx
+                                  ? "#2563eb"
+                                  : "transparent",
+                              color:
+                                idx === originalInvoiceHighlightIdx
+                                  ? "white"
+                                  : positiveText,
+                              display: "grid",
+                              gap: 4,
+                            }}
+                            onMouseEnter={() => setOriginalInvoiceHighlightIdx(idx)}
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              applySourceInvoiceSelection(entry);
+                            }}
+                          >
+                            <span style={{ fontWeight: 800 }}>{entry.invoiceNo}</span>
+                            <span
+                              style={{
+                                fontSize: 12,
+                                opacity: 0.88,
+                              }}
+                            >
+                              {entry.partyName || "Party"}{entry.gstNo ? ` | GST: ${entry.gstNo}` : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </label>
             )}
 
             <label style={fieldWrap}>
@@ -2310,7 +3481,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                     });
                   } else if (e.key === "Enter") {
                     e.preventDefault();
-                    if (!itemSearch.trim() && filteredItems.length === items.length) {
+                    if (!itemSearch.trim() && filteredItems.length === itemOptions.length) {
                       setItemDropdownOpen(false);
                       saveEntry();
                       return;
@@ -2558,8 +3729,28 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
               <SummaryLine label="CGST" value={formatMoney(cgst)} />
               <SummaryLine label="SGST" value={formatMoney(sgst)} />
               <SummaryLine label="IGST" value={formatMoney(igst)} />
+              {cfg.isAdjustment && (
+                <>
+                  <SummaryLine
+                    label="Original Invoice Total"
+                    value={formatMoney(originalInvoiceTotal)}
+                  />
+                  <SummaryLine
+                    label="Revised Invoice Total"
+                    value={formatMoney(totalAmount)}
+                  />
+                  <SummaryLine
+                    label="System Decision"
+                    value={adjustmentNoteLabel}
+                  />
+                </>
+              )}
               <SummaryLine label="Round Off" value={`${roundOff >= 0 ? "+" : ""}${formatMoney(roundOff)}`} />
-              <SummaryLine label="Grand Total" value={formatMoney(totalAmount)} style={{ fontWeight: "900", color: "#f8fafc" }} />
+              <SummaryLine
+                label={cfg.isAdjustment ? cfg.amountLabel || "Adjustment Amount" : "Grand Total"}
+                value={formatMoney(cfg.isAdjustment ? adjustmentAmount : totalAmount)}
+                style={{ fontWeight: "900", color: "#f8fafc" }}
+              />
               
               <div style={grandLine}>
                 <span>Amt Before Round Off</span>
@@ -2662,7 +3853,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
         {showSaveConfirm && saveConfirmData && saveConfirmSplit && (
           <Modal
-            title="Invoice Saved"
+            title={cfg.isAdjustment ? `${saveConfirmFlow.title} Saved` : "Invoice Saved"}
             onClose={() => {
               setShowSaveConfirm(false);
               setSaveConfirmData(null);
@@ -2681,7 +3872,9 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
               <div style={saveConfirmMeta}>
                 <div style={saveConfirmMetaRow}>
-                  <span style={saveConfirmMetaLabel}>Invoice No</span>
+                  <span style={saveConfirmMetaLabel}>
+                    {cfg.isAdjustment ? "Note No" : "Invoice No"}
+                  </span>
                   <span style={saveConfirmMetaValue}>{saveConfirmData.invoiceNo}</span>
                 </div>
                 <div style={saveConfirmMetaRow}>
@@ -2694,7 +3887,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                 <div style={modalGridStyle}>
                   <label style={fieldWrap}>
                     <span style={{ ...fieldLabel, fontSize: 15 }}>
-                      {DEFAULT_CASH_ACCOUNT} {cfg.isIncoming ? "Received" : "Paid"}
+                      {DEFAULT_CASH_ACCOUNT} {saveConfirmFlow.isIncoming ? "Received" : "Paid"}
                     </span>
                     <input
                       style={saveConfirmInput}
@@ -2708,7 +3901,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
                   <label style={fieldWrap}>
                     <span style={{ ...fieldLabel, fontSize: 15 }}>
-                      {DEFAULT_BANK_ACCOUNT} {cfg.isIncoming ? "Received" : "Paid"}
+                      {DEFAULT_BANK_ACCOUNT} {saveConfirmFlow.isIncoming ? "Received" : "Paid"}
                     </span>
                     <input
                       style={saveConfirmInput}
@@ -2720,9 +3913,9 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                 </div>
 
                 <div style={saveConfirmPendingNote}>
-                  Total {cfg.isIncoming ? "Received" : "Paid"}: {formatMoney(saveConfirmSplit.settledAmount)}
+                  Total {saveConfirmFlow.isIncoming ? "Received" : "Paid"}: {formatMoney(saveConfirmSplit.settledAmount)}
                   {"  "} | {"  "}
-                  {cfg.isIncoming ? "Receivable" : "Payable"}: {formatMoney(saveConfirmSplit.pendingAmount)}
+                  {saveConfirmFlow.isIncoming ? "Receivable" : "Payable"}: {formatMoney(saveConfirmSplit.pendingAmount)}
                 </div>
 
                 {saveConfirmSplit.isOverLimit && (
@@ -2766,7 +3959,16 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   );
 }
 
-function Field({ label, value, onChange, placeholder, type = "text", inputRef, onKeyDown, onFocus }: any) {
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+  inputRef,
+  onKeyDown,
+  onFocus,
+}: any) {
   return (
     <label style={fieldWrap}>
       <span style={fieldLabel}>{label}</span>
@@ -2777,7 +3979,17 @@ function Field({ label, value, onChange, placeholder, type = "text", inputRef, o
         value={value ?? ""}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        onKeyDown={onKeyDown}
+        onKeyDown={(e) => {
+          onKeyDown?.(e);
+          if (
+            !e.defaultPrevented &&
+            e.key === "Enter" &&
+            isEnterNavigationTarget(e.currentTarget)
+          ) {
+            e.preventDefault();
+            focusNextControl(e.currentTarget);
+          }
+        }}
         onFocus={onFocus}
       />
     </label>
@@ -2858,6 +4070,52 @@ function FlexibleDateField({
   );
 });
 
+const isEnterNavigationTarget = (target: EventTarget | null) =>
+  target instanceof HTMLInputElement ||
+  target instanceof HTMLSelectElement ||
+  target instanceof HTMLTextAreaElement;
+
+const focusElementAndSelect = (element?: HTMLElement | null) => {
+  if (!element) return;
+  element.focus();
+  if (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement
+  ) {
+    element.select();
+  }
+};
+
+const getFocusableControls = (root?: ParentNode | null) => {
+  if (!root || !("querySelectorAll" in root)) return [] as HTMLElement[];
+
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]):not([data-modal-close="true"])',
+    ),
+  ).filter(
+    (element) =>
+      element.tabIndex !== -1 &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.offsetParent !== null,
+  );
+};
+
+const focusNextControl = (current: HTMLElement, root?: ParentNode | null) => {
+  const container =
+    root ||
+    current.closest("[data-modal-body='true']") ||
+    current.closest("main") ||
+    document.body;
+  const controls = getFocusableControls(container);
+  const index = controls.indexOf(current);
+  if (index < 0) return;
+  const next = controls[index + 1];
+  if (next) {
+    focusElementAndSelect(next);
+  }
+};
+
 function SummaryLine({ label, value, style }: { label: string; value: string; style?: React.CSSProperties }) {
   return (
     <div style={{ ...summaryLine, ...style }}>
@@ -2868,6 +4126,8 @@ function SummaryLine({ label, value, style }: { label: string; value: string; st
 }
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  const modalBodyRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { 
       if (e.key === "Escape") {
@@ -2880,12 +4140,48 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
     return () => document.removeEventListener("keydown", handler, true);
   }, [onClose]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const firstControl = getFocusableControls(modalBodyRef.current)[0];
+      focusElementAndSelect(firstControl);
+    }, 40);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <div style={modalOverlay} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={modalBox}>
+      <div
+        style={modalBox}
+        ref={modalBodyRef}
+        data-modal-body="true"
+        onKeyDownCapture={(event) => {
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            isEnterNavigationTarget(event.target)
+          ) {
+            const current = event.target as HTMLElement;
+            const controls = getFocusableControls(modalBodyRef.current);
+            const index = controls.indexOf(current);
+            const next = index >= 0 ? controls[index + 1] : null;
+
+            if (next) {
+              event.preventDefault();
+              focusElementAndSelect(next);
+            }
+          }
+        }}
+      >
         <div style={modalHeader}>
           <h2 style={modalTitle}>{title}</h2>
-          <button style={modalCloseBtn} onClick={onClose}>X</button>
+          <button
+            style={modalCloseBtn}
+            onClick={onClose}
+            data-modal-close="true"
+          >
+            X
+          </button>
         </div>
         {children}
       </div>
@@ -2902,6 +4198,16 @@ function ModalInput({ label, value, onChange, type = "text" }: any) {
         type={type}
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (
+            !e.defaultPrevented &&
+            e.key === "Enter" &&
+            isEnterNavigationTarget(e.currentTarget)
+          ) {
+            e.preventDefault();
+            focusNextControl(e.currentTarget);
+          }
+        }}
       />
     </label>
   );

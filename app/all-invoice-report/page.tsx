@@ -30,11 +30,12 @@ type TabType =
   | "ALL"
   | "SALES"
   | "PURCHASE"
-  | "SALES RETURN"
-  | "PURCHASE RETURN";
+  | "CREDIT NOTE"
+  | "DEBIT NOTE";
 
 type Row = {
   id: string;
+  recordId: number | null;
   date: string;
   time: string;
   type: Exclude<TabType, "ALL">;
@@ -127,10 +128,16 @@ const normalizeType = (value: string): Exclude<TabType, "ALL"> | null => {
 
   if (normalized === "SALE" || normalized === "SALES") return "SALES";
   if (normalized === "PURCHASE") return "PURCHASE";
-  if (normalized === "SALES RETURN" || normalized === "SALE RETURN") {
-    return "SALES RETURN";
+  if (
+    normalized === "SALES RETURN" ||
+    normalized === "SALE RETURN" ||
+    normalized === "CREDIT NOTE"
+  ) {
+    return "CREDIT NOTE";
   }
-  if (normalized === "PURCHASE RETURN") return "PURCHASE RETURN";
+  if (normalized === "PURCHASE RETURN" || normalized === "DEBIT NOTE") {
+    return "DEBIT NOTE";
+  }
   return null;
 };
 
@@ -174,6 +181,7 @@ export default function AllInvoiceReportPage() {
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [company, setCompany] = useState<Record<string, unknown>>({});
+  const [invoiceEditEnabled, setInvoiceEditEnabled] = useState(false);
 
   const [search, setSearch] = useState("");
   const [gstRate, setGstRate] = useState("");
@@ -186,6 +194,7 @@ export default function AllInvoiceReportPage() {
   useEffect(() => {
     void loadRows();
     loadCompanySettings();
+    void loadInvoiceEditSettings();
     window.setTimeout(() => searchRef.current?.focus(), 220);
   }, []);
 
@@ -220,11 +229,39 @@ export default function AllInvoiceReportPage() {
     }
   };
 
+  const loadInvoiceEditSettings = async () => {
+    try {
+      const res = await fetch(`${API}/settings`);
+      if (!res.ok) {
+        throw new Error("settings fetch failed");
+      }
+
+      const data = await res.json();
+      const enabled = Boolean(data?.invoiceEditEnabled);
+
+      setInvoiceEditEnabled(enabled);
+      localStorage.setItem(
+        "invoiceEditConfig",
+        JSON.stringify({
+          enabled,
+          passwordConfigured: Boolean(data?.invoiceEditPasswordConfigured),
+        }),
+      );
+    } catch {
+      try {
+        const local = JSON.parse(localStorage.getItem("invoiceEditConfig") || "{}");
+        setInvoiceEditEnabled(Boolean(local?.enabled));
+      } catch {
+        setInvoiceEditEnabled(false);
+      }
+    }
+  };
+
   const getAmount = (row: any) =>
     Number(row.totalAmount || row.grandTotal || row.invoiceAmount || row.amount || 0);
 
   const getInvoiceNo = (row: any) =>
-    row.invoiceNo || row.returnNo || row.referenceNo || "-";
+    row.noteNo || row.invoiceNo || row.returnNo || row.referenceNo || "-";
 
   const getParty = (row: any) =>
     row.partyName || row.customerName || row.supplierName || row.party || "-";
@@ -287,7 +324,7 @@ export default function AllInvoiceReportPage() {
   ) => {
     const pending = Math.max(amount - paidReceived, 0);
 
-    if (type === "SALES" || type === "PURCHASE RETURN") {
+    if (type === "SALES" || type === "DEBIT NOTE") {
       if (pending <= 0) return "Received";
       if (paidReceived > 0) return "Part Received";
       return "Not Received";
@@ -324,6 +361,12 @@ export default function AllInvoiceReportPage() {
 
       return {
         id: `${type}-${row.id || invoiceNo || index}`,
+        recordId:
+          typeof row.id === "number"
+            ? row.id
+            : Number.isFinite(Number(row.id))
+            ? Number(row.id)
+            : null,
         date: row.date || row.createdAt || "",
         time: getTime(row),
         type,
@@ -343,10 +386,68 @@ export default function AllInvoiceReportPage() {
       };
     });
 
+  const makeAdjustmentRows = (data: any[], path: string): Row[] =>
+    (Array.isArray(data) ? data : []).map((row: any, index: number) => {
+      const noteType =
+        String(row.noteType || "").toUpperCase() === "DEBIT"
+          ? "DEBIT NOTE"
+          : "CREDIT NOTE";
+      const amount = getAmount(row);
+      const invoiceNo = getInvoiceNo(row);
+      const paymentStatus = JSON.parse(
+        localStorage.getItem("invoicePaymentStatus") || "{}",
+      );
+      const endpoint = path.replace("/", "");
+      const paymentEntry =
+        paymentStatus[`${endpoint}:${invoiceNo}`] ||
+        (row.id ? paymentStatus[`${endpoint}:${row.id}`] : null);
+      const paidReceived = Number(
+        paymentEntry?.paidAmount ||
+          paymentEntry?.receivedAmount ||
+          row.paidAmount ||
+          row.receivedAmount ||
+          0,
+      );
+      const pending = Math.max(amount - paidReceived, 0);
+
+      return {
+        id: `${endpoint}-${row.id || invoiceNo || index}`,
+        recordId:
+          typeof row.id === "number"
+            ? row.id
+            : Number.isFinite(Number(row.id))
+            ? Number(row.id)
+            : null,
+        date: row.date || row.createdAt || "",
+        time: getTime(row),
+        type: noteType,
+        invoiceNo,
+        originalInvoiceNo: row.originalInvoiceNo || "-",
+        party: getParty(row),
+        gstNo: row.gstNo || row.gstNumber || "B2C",
+        item: getItem(row),
+        qty: getQty(row),
+        rate: getRate(row),
+        gstRate: getGstRate(row),
+        amount,
+        paidReceived,
+        pending,
+        status: getStatus(noteType, amount, paidReceived),
+        path,
+      };
+    });
+
   const loadRows = async () => {
     setLoading(true);
     try {
-      const [salesRes, purchaseRes, salesReturnRes, purchaseReturnRes] =
+      const [
+        salesRes,
+        purchaseRes,
+        salesReturnRes,
+        purchaseReturnRes,
+        salesAdjustmentRes,
+        purchaseAdjustmentRes,
+      ] =
         await Promise.all([
           fetch(`${API}/sales`).then((res) => (res.ok ? res.json() : [])),
           fetch(`${API}/purchase`).then((res) => (res.ok ? res.json() : [])),
@@ -356,13 +457,21 @@ export default function AllInvoiceReportPage() {
           fetch(`${API}/purchase-return`).then((res) =>
             res.ok ? res.json() : [],
           ),
+          fetch(`${API}/sales-adjustment`).then((res) =>
+            res.ok ? res.json() : [],
+          ),
+          fetch(`${API}/purchase-adjustment`).then((res) =>
+            res.ok ? res.json() : [],
+          ),
         ]);
 
       setRows([
         ...makeRows(salesRes, "SALES", "/sales"),
         ...makeRows(purchaseRes, "PURCHASE", "/purchase"),
-        ...makeRows(salesReturnRes, "SALES RETURN", "/sales-return"),
-        ...makeRows(purchaseReturnRes, "PURCHASE RETURN", "/purchase-return"),
+        ...makeRows(salesReturnRes, "CREDIT NOTE", "/sales-return"),
+        ...makeRows(purchaseReturnRes, "DEBIT NOTE", "/purchase-return"),
+        ...makeAdjustmentRows(salesAdjustmentRes, "/sales-adjustment"),
+        ...makeAdjustmentRows(purchaseAdjustmentRes, "/purchase-adjustment"),
       ]);
     } catch (error) {
       console.error("Failed to load invoice report:", error);
@@ -427,7 +536,7 @@ export default function AllInvoiceReportPage() {
         "GST %": 18,
       },
       {
-        Type: "PURCHASE RETURN",
+        Type: "DEBIT NOTE",
         "Invoice No / Return No": "PR-2026-0004",
         "Original Invoice No": "PUR-2026-0012",
         "Party Name": "KAVI TRADERS",
@@ -500,7 +609,7 @@ export default function AllInvoiceReportPage() {
             ? "sales"
             : type === "PURCHASE"
             ? "purchase"
-            : type === "SALES RETURN"
+            : type === "CREDIT NOTE"
             ? "sales-return"
             : "purchase-return";
 
@@ -525,7 +634,7 @@ export default function AllInvoiceReportPage() {
                 rate,
                 gstRate: gstRateValue,
               }
-            : type === "SALES RETURN"
+            : type === "CREDIT NOTE"
             ? {
                 returnNo: invoiceNo,
                 originalInvoiceNo: originalInvoiceNo || "-",
@@ -655,11 +764,212 @@ export default function AllInvoiceReportPage() {
     window.setTimeout(() => searchRef.current?.focus(), 50);
   };
 
+  const handleRowAction = (row: Row) => {
+    const supportsDirectEdit =
+      Boolean(row.recordId) &&
+      (invoiceEditEnabled || row.path.includes("adjustment"));
+
+    if (!supportsDirectEdit) {
+      router.push(row.path);
+      return;
+    }
+
+    router.push(`${row.path}?editId=${row.recordId}`);
+  };
+
+  const handleCreateAdjustmentNote = (row: Row) => {
+    if ((row.type !== "SALES" && row.type !== "PURCHASE") || !row.recordId) {
+      return;
+    }
+
+    const adjustmentPath =
+      row.type === "PURCHASE" ? "/purchase-adjustment" : "/sales-adjustment";
+
+    router.push(
+      `${adjustmentPath}?sourceId=${row.recordId}&originalInvoiceNo=${encodeURIComponent(
+        row.invoiceNo,
+      )}`,
+    );
+  };
+
+  const canEditFromReport = (row: Row) =>
+    Boolean(row.recordId) &&
+    (invoiceEditEnabled || row.path.includes("adjustment"));
+
+  const getPrintMoney = (value: number) =>
+    `Rs ${Number(value || 0).toLocaleString("en-IN")}`;
+
+  const handlePrintRow = (row: Row) => {
+    const endpoint = row.path.replace("/", "");
+    let storedMeta: Record<string, any> | null = null;
+
+    try {
+      const store = JSON.parse(localStorage.getItem("invoiceInvoiceMeta") || "{}");
+      storedMeta =
+        store[`${endpoint}:${row.invoiceNo}`] ||
+        (row.recordId ? store[`${endpoint}:${row.recordId}`] : null) ||
+        null;
+    } catch {
+      storedMeta = null;
+    }
+
+    const lines =
+      Array.isArray(storedMeta?.items) && storedMeta.items.length > 0
+        ? storedMeta.items
+        : [
+            {
+              itemName: row.item,
+              quantity: row.qty,
+              rate: row.rate,
+              gstRate: row.gstRate,
+              totalAmount: row.amount,
+            },
+          ];
+
+    const isIncoming = row.type === "SALES" || row.type === "DEBIT NOTE";
+    const isNote = row.type.includes("NOTE");
+    const originalTotal = Number(storedMeta?.originalTotalAmount || 0);
+    const revisedTotal = Number(
+      storedMeta?.adjustedTotalAmount || storedMeta?.grandTotal || row.amount,
+    );
+    const adjustmentAmount = Math.abs(
+      Number(storedMeta?.adjustmentAmount || revisedTotal - originalTotal),
+    );
+    const companyLogo = String(company.logo || company.photo || "").trim();
+    const popup = window.open("", "_blank");
+
+    if (!popup) return;
+
+    const itemRows = lines
+      .map(
+        (line: any, idx: number) => `
+          <tr style="background:${idx % 2 === 0 ? "#ffffff" : "#fbfaf4"};">
+            <td style="padding:10px;border:1px solid #d9c57b;text-align:left;">${line.itemName || "-"}</td>
+            <td style="padding:10px;border:1px solid #d9c57b;">${Number(line.quantity || 0)}</td>
+            <td style="padding:10px;border:1px solid #d9c57b;">${getPrintMoney(Number(line.rate || 0))}</td>
+            <td style="padding:10px;border:1px solid #d9c57b;">${Number(line.gstRate || 0)}%</td>
+            <td style="padding:10px;border:1px solid #d9c57b;">${getPrintMoney(Number(line.totalAmount || 0))}</td>
+          </tr>
+        `,
+      )
+      .join("");
+
+    popup.document.write(`
+      <html>
+      <head>
+        <title>${row.type} - ${row.invoiceNo}</title>
+        <style>
+          body { font-family: Cambria, Georgia, serif; background:#f5e8aa; padding:22px; color:#1f2937; }
+          .sheet { max-width:900px; margin:0 auto; background:#fffdf6; border:1px solid #d9c57b; border-radius:18px; padding:24px; }
+          .top { display:flex; justify-content:space-between; gap:20px; border-bottom:2px solid #d9c57b; padding-bottom:16px; }
+          .company-block { display:flex; align-items:center; gap:14px; }
+          .company { font-size:30px; font-weight:900; color:#3f2a00; }
+          .logo { width:74px; height:74px; border-radius:16px; object-fit:cover; border:1px solid #d9c57b; background:#fffdf6; padding:6px; }
+          .muted { margin-top:6px; color:#6b7280; font-size:13px; line-height:1.6; }
+          .box { min-width:240px; background:linear-gradient(135deg,#fffbe6,#f2df9d); border:1px solid #d9c57b; border-radius:14px; padding:14px; }
+          .box h2 { margin:0 0 10px; font-size:20px; color:#1f2937; }
+          .meta { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:18px; }
+          .metaCard { border:1px solid #eadca8; border-radius:14px; padding:14px; background:#fffef9; }
+          .label { font-size:11px; font-weight:900; text-transform:uppercase; color:#9ca3af; }
+          .value { margin-top:4px; font-size:15px; font-weight:800; color:#1f2937; }
+          table { width:100%; border-collapse:collapse; margin-top:18px; }
+          th { padding:10px; border:1px solid #d9c57b; background:#f3e8b8; font-size:12px; text-transform:uppercase; color:#5b4b19; }
+          td { text-align:center; font-size:13px; }
+          .summary { margin-top:18px; border:1px solid #d9c57b; border-radius:14px; background:#fffdf2; padding:14px; }
+          .sumrow { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px dashed #ddd6b5; font-weight:800; }
+          .sumrow:last-child { border-bottom:none; }
+          .printBtn { position:fixed; right:24px; bottom:24px; border:none; border-radius:999px; background:#111827; color:#fff; padding:12px 22px; font-weight:900; cursor:pointer; }
+          @media print { body { background:#fff; padding:0; } .sheet { border:none; box-shadow:none; } .printBtn { display:none; } }
+        </style>
+      </head>
+      <body>
+        <div class="sheet">
+          <div class="top">
+            <div class="company-block">
+              ${companyLogo ? `<img class="logo" src="${companyLogo}" alt="Company Logo" />` : ""}
+              <div>
+                <div class="company">${String(company.companyName || "SJQD SOFTWARE")}</div>
+                <div class="muted">
+                  ${String(company.address || "Company Address")}
+                  <br />
+                  GSTIN: ${companyGST}
+                </div>
+              </div>
+            </div>
+            <div class="box">
+              <h2>${row.type}</h2>
+              <div><b>${isNote ? "Note No" : "Invoice No"}:</b> ${row.invoiceNo}</div>
+              <div><b>Date:</b> ${formatDate(row.date)}</div>
+              <div><b>Party:</b> ${row.party}</div>
+              ${
+                row.originalInvoiceNo && row.originalInvoiceNo !== "-"
+                  ? `<div><b>Original Invoice:</b> ${row.originalInvoiceNo}</div>`
+                  : ""
+              }
+            </div>
+          </div>
+
+          <div class="meta">
+            <div class="metaCard">
+              <div class="label">${row.type === "PURCHASE" || row.path.includes("purchase") ? "Supplier" : "Customer"}</div>
+              <div class="value">${row.party}</div>
+            </div>
+            <div class="metaCard">
+              <div class="label">GST No</div>
+              <div class="value">${row.gstNo || "B2C"}</div>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th style="text-align:left;">Item</th>
+                <th>Qty</th>
+                <th>Rate</th>
+                <th>GST %</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+
+          <div class="summary">
+            ${
+              row.path.includes("adjustment")
+                ? `<div class="sumrow"><span>Original Invoice Total</span><span>${getPrintMoney(originalTotal)}</span></div>
+                   <div class="sumrow"><span>Revised Invoice Total</span><span>${getPrintMoney(revisedTotal)}</span></div>
+                   <div class="sumrow"><span>${row.type}</span><span>${getPrintMoney(adjustmentAmount || row.amount)}</span></div>`
+                : `<div class="sumrow"><span>Total Amount</span><span>${getPrintMoney(row.amount)}</span></div>`
+            }
+            <div class="sumrow"><span>${isIncoming ? "Received" : "Paid"}</span><span>${getPrintMoney(row.paidReceived)}</span></div>
+            <div class="sumrow"><span>${isIncoming ? "Receivable" : "Payable"}</span><span>${getPrintMoney(row.pending)}</span></div>
+            <div class="sumrow"><span>Status</span><span>${row.status}</span></div>
+          </div>
+        </div>
+        <button class="printBtn" onclick="window.print()">Print</button>
+        <script>
+          window.onload = function () {
+            setTimeout(function () { window.print(); }, 250);
+          };
+        </script>
+      </body>
+      </html>
+    `);
+    popup.document.close();
+  };
+
   const totalAmount = filtered.reduce((sum, row) => sum + row.amount, 0);
   const totalPending = filtered.reduce((sum, row) => sum + row.pending, 0);
 
   const showOriginalColumn =
-    tab === "ALL" || tab === "SALES RETURN" || tab === "PURCHASE RETURN";
+    tab === "ALL" || tab === "CREDIT NOTE" || tab === "DEBIT NOTE";
+
+  const documentNoLabel =
+    tab === "ALL"
+      ? "Doc No"
+      : tab.includes("NOTE")
+      ? "Note No"
+      : "Invoice No";
 
   const companyGST = getCompanyGST(company);
 
@@ -712,7 +1022,7 @@ export default function AllInvoiceReportPage() {
               All Invoice Report
             </h1>
             <p style={subtitle}>
-              Sales, Purchase, Sales Return and Purchase Return combined report.
+              Sales, Purchase, Credit Note and Debit Note combined report.
             </p>
           </div>
 
@@ -742,11 +1052,12 @@ export default function AllInvoiceReportPage() {
         <section style={formatCard} className="no-print">
           <div style={formatTitle}>Excel Column Order</div>
           <div style={formatText}>
-            Type | Invoice No / Return No | Original Invoice No | Party Name | GST No | Item Name | Qty | Rate | GST %
+            Type | Invoice No / Note No | Original Invoice No | Party Name | GST No | Item Name | Qty | Rate | GST %
           </div>
           <div style={formatHint}>
             One Excel row should be one invoice item line. Valid type names:
-            SALES, PURCHASE, SALES RETURN, PURCHASE RETURN.
+            SALES, PURCHASE, CREDIT NOTE, DEBIT NOTE.
+            SALES RETURN and PURCHASE RETURN are also accepted as aliases.
           </div>
         </section>
 
@@ -768,8 +1079,8 @@ export default function AllInvoiceReportPage() {
               "ALL",
               "SALES",
               "PURCHASE",
-              "SALES RETURN",
-              "PURCHASE RETURN",
+              "CREDIT NOTE",
+              "DEBIT NOTE",
             ] as TabType[]
           ).map((item) => (
             <button
@@ -894,7 +1205,7 @@ export default function AllInvoiceReportPage() {
                   <th style={th}>Date</th>
                   <th style={th}>Time</th>
                   <th style={th}>Type</th>
-                  <th style={th}>{tab.includes("RETURN") ? "Return No" : "Invoice No"}</th>
+                  <th style={th}>{documentNoLabel}</th>
                   {showOriginalColumn && <th style={th}>Original Invoice No</th>}
                   <th style={th}>Party</th>
                   <th style={th}>GST No</th>
@@ -941,9 +1252,29 @@ export default function AllInvoiceReportPage() {
                         <span style={badge(row.status)}>{row.status}</span>
                       </td>
                       <td style={td} className="no-print">
-                        <button style={openBtn} onClick={() => router.push(row.path)}>
-                          Open
-                        </button>
+                        <div style={actionBtnWrap}>
+                          <button
+                            style={openBtn}
+                            onClick={() => handleRowAction(row)}
+                          >
+                            {canEditFromReport(row) ? "Edit" : "Open"}
+                          </button>
+                          <button
+                            style={rowPrintBtn}
+                            onClick={() => handlePrintRow(row)}
+                          >
+                            Print
+                          </button>
+                          {(row.type === "SALES" || row.type === "PURCHASE") &&
+                          row.recordId ? (
+                            <button
+                              style={noteBtn}
+                              onClick={() => handleCreateAdjustmentNote(row)}
+                            >
+                              Credit / Debit Note
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1324,4 +1655,22 @@ const openBtn: CSSProperties = {
   padding: "9px 14px",
   fontWeight: 900,
   cursor: "pointer",
+};
+
+const rowPrintBtn: CSSProperties = {
+  ...openBtn,
+  background: "#111827",
+};
+
+const noteBtn: CSSProperties = {
+  ...openBtn,
+  background: "#b45309",
+};
+
+const actionBtnWrap: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  flexWrap: "wrap",
 };

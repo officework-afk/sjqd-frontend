@@ -20,7 +20,27 @@ import {
 
 const API = API_BASE_URL;
 
-const defaultSettings = {
+type SettingsForm = {
+  salesPrefix: string;
+  purchasePrefix: string;
+  salesReturnPrefix: string;
+  purchaseReturnPrefix: string;
+  financialYear: string;
+  stockMethod: string;
+  lowStockLimit: string;
+  bankName: string;
+  accountNumber: string;
+  ifscCode: string;
+  branchName: string;
+  terms: string;
+  signatureImage: string;
+  invoiceEditEnabled: boolean;
+  invoiceEditPassword: string;
+  invoiceEditPasswordConfirm: string;
+  invoiceEditPasswordConfigured: boolean;
+};
+
+const defaultSettings: SettingsForm = {
   salesPrefix: "SAL",
   purchasePrefix: "PUR",
   salesReturnPrefix: "SR",
@@ -34,106 +54,355 @@ const defaultSettings = {
   branchName: "",
   terms: "Goods once sold will not be taken back. Subject to local jurisdiction.",
   signatureImage: "",
+  invoiceEditEnabled: false,
+  invoiceEditPassword: "",
+  invoiceEditPasswordConfirm: "",
+  invoiceEditPasswordConfigured: false,
+};
+
+const getLocalSettings = (form: SettingsForm) => ({
+  salesPrefix: form.salesPrefix,
+  purchasePrefix: form.purchasePrefix,
+  salesReturnPrefix: form.salesReturnPrefix,
+  purchaseReturnPrefix: form.purchaseReturnPrefix,
+  financialYear: form.financialYear,
+  stockMethod: form.stockMethod,
+  lowStockLimit: form.lowStockLimit,
+  bankName: form.bankName,
+  accountNumber: form.accountNumber,
+  ifscCode: form.ifscCode,
+  branchName: form.branchName,
+  terms: form.terms,
+  signatureImage: form.signatureImage,
+  invoiceEditEnabled: form.invoiceEditEnabled,
+});
+
+const readResponseMessage = async (response: Response) => {
+  try {
+    const data = await response.json();
+    return String(data?.message || "").trim();
+  } catch {
+    return "";
+  }
 };
 
 export default function SettingsPage() {
   const router = useRouter();
-  const [form, setForm] = useState<any>(defaultSettings);
+  const [form, setForm] = useState<SettingsForm>(defaultSettings);
   const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [invoiceEditModalMode, setInvoiceEditModalMode] = useState<
+    "set-password" | "verify-enable" | null
+  >(null);
+  const [showInvoiceEditPasswordModal, setShowInvoiceEditPasswordModal] =
+    useState(false);
+  const [invoiceEditPasswordDraft, setInvoiceEditPasswordDraft] = useState("");
+  const [invoiceEditPasswordConfirmDraft, setInvoiceEditPasswordConfirmDraft] =
+    useState("");
+  const [invoiceEditEnablePasswordDraft, setInvoiceEditEnablePasswordDraft] =
+    useState("");
 
   useEffect(() => {
-    loadSettings();
+    void loadSettings();
   }, []);
 
-  const update = (key: string, value: string) => {
-    setForm((prev: any) => ({
+  const update = <K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) => {
+    setForm((prev) => ({
       ...prev,
       [key]: value,
     }));
   };
 
-  const loadSettings = async () => {
+  const closeInvoiceEditPasswordModal = () => {
+    setShowInvoiceEditPasswordModal(false);
+    setInvoiceEditModalMode(null);
+    setInvoiceEditPasswordDraft("");
+    setInvoiceEditPasswordConfirmDraft("");
+    setInvoiceEditEnablePasswordDraft("");
+  };
+
+  const openInvoiceEditPasswordModal = (
+    mode: "set-password" | "verify-enable",
+  ) => {
+    setInvoiceEditModalMode(mode);
+    setShowInvoiceEditPasswordModal(true);
+    setInvoiceEditPasswordDraft("");
+    setInvoiceEditPasswordConfirmDraft("");
+    setInvoiceEditEnablePasswordDraft("");
+  };
+
+  const handleInvoiceEditToggle = (checked: boolean) => {
+    if (!checked) {
+      setForm((prev) => ({
+        ...prev,
+        invoiceEditEnabled: false,
+        invoiceEditPassword: "",
+        invoiceEditPasswordConfirm: "",
+      }));
+      closeInvoiceEditPasswordModal();
+      return;
+    }
+
+    if (!form.invoiceEditPasswordConfigured) {
+      alert("First set and save the invoice edit password, then enable this option.");
+      return;
+    }
+
+    openInvoiceEditPasswordModal("verify-enable");
+  };
+
+  const applyInvoiceEditPassword = () => {
+    const cleanPassword = invoiceEditPasswordDraft.trim();
+    const cleanConfirmPassword = invoiceEditPasswordConfirmDraft.trim();
+
+    if (!cleanPassword) {
+      alert("Please enter the invoice edit password.");
+      return;
+    }
+
+    if (cleanPassword.length < 4) {
+      alert("Invoice edit password must be at least 4 characters.");
+      return;
+    }
+
+    if (cleanPassword !== cleanConfirmPassword) {
+      alert("Invoice edit passwords do not match.");
+      return;
+    }
+
+    setForm((prev) => ({
+      ...prev,
+      invoiceEditEnabled: true,
+      invoiceEditPassword: cleanPassword,
+      invoiceEditPasswordConfirm: cleanConfirmPassword,
+      }));
+    closeInvoiceEditPasswordModal();
+  };
+
+  const verifyAndEnableInvoiceEdit = async () => {
+    const password = invoiceEditEnablePasswordDraft.trim();
+
+    if (!password) {
+      alert("Please enter the saved invoice edit password.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/settings/invoice-edit/verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ password }),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        alert(data?.message || "Invoice edit password is incorrect.");
+        return;
+      }
+
+      setForm((prev) => ({
+        ...prev,
+        invoiceEditEnabled: true,
+      }));
+      closeInvoiceEditPasswordModal();
+    } catch {
+      alert("Could not verify the invoice edit password. Please try again.");
+    }
+  };
+
+  async function loadSettings() {
     try {
       const local = localStorage.getItem("companySettings");
 
       if (local) {
-        setForm((prev: any) => ({
+        const parsed = JSON.parse(local);
+        setForm((prev) => ({
           ...prev,
-          ...JSON.parse(local),
+          ...parsed,
+          invoiceEditPassword: "",
+          invoiceEditPasswordConfirm: "",
         }));
       }
 
-      const res = await fetch(`${API}/company`);
-      const data = await res.json();
+      const [companyRes, settingsRes] = await Promise.all([
+        fetch(`${API}/company`),
+        fetch(`${API}/settings`),
+      ]);
 
-      if (data) {
-        const nextSettings = {
-          salesPrefix: data.salesPrefix || form.salesPrefix,
-          purchasePrefix: data.purchasePrefix || form.purchasePrefix,
-          salesReturnPrefix: data.salesReturnPrefix || form.salesReturnPrefix,
-          purchaseReturnPrefix: data.purchaseReturnPrefix || form.purchaseReturnPrefix,
-          financialYear: data.financialYear || form.financialYear,
-          stockMethod: data.stockMethod || form.stockMethod,
-          lowStockLimit: String(data.lowStockLimit || form.lowStockLimit),
-          bankName: data.bankName || form.bankName,
-          accountNumber: data.accountNumber || form.accountNumber,
-          ifscCode: data.ifscCode || form.ifscCode,
-          branchName: data.branchName || form.branchName,
-          terms: data.terms || form.terms,
-        };
+      const companyData = companyRes.ok ? await companyRes.json() : null;
+      const settingsData = settingsRes.ok ? await settingsRes.json() : null;
 
-        setForm((prev: any) => ({
-          ...prev,
-          ...nextSettings,
-        }));
-        localStorage.setItem(
-          "companySettings",
-          JSON.stringify({
-            ...JSON.parse(localStorage.getItem("companySettings") || "{}"),
+      const nextSettings: Partial<SettingsForm> = {};
+
+      if (companyData) {
+        nextSettings.salesPrefix = companyData.salesPrefix || defaultSettings.salesPrefix;
+        nextSettings.purchasePrefix = companyData.purchasePrefix || defaultSettings.purchasePrefix;
+        nextSettings.salesReturnPrefix =
+          companyData.salesReturnPrefix || defaultSettings.salesReturnPrefix;
+        nextSettings.purchaseReturnPrefix =
+          companyData.purchaseReturnPrefix || defaultSettings.purchaseReturnPrefix;
+        nextSettings.financialYear = companyData.financialYear || defaultSettings.financialYear;
+        nextSettings.bankName = companyData.bankName || defaultSettings.bankName;
+        nextSettings.accountNumber = companyData.accountNumber || defaultSettings.accountNumber;
+        nextSettings.ifscCode = companyData.ifscCode || defaultSettings.ifscCode;
+        nextSettings.branchName = companyData.branchName || defaultSettings.branchName;
+        nextSettings.terms = companyData.terms || defaultSettings.terms;
+        nextSettings.signatureImage =
+          companyData.signatureImage || defaultSettings.signatureImage;
+      }
+
+      if (settingsData) {
+        nextSettings.stockMethod = settingsData.stockMethod || defaultSettings.stockMethod;
+        nextSettings.lowStockLimit = String(
+          settingsData.lowStockLimit ?? defaultSettings.lowStockLimit,
+        );
+        nextSettings.invoiceEditEnabled = Boolean(settingsData.invoiceEditEnabled);
+        nextSettings.invoiceEditPasswordConfigured = Boolean(
+          settingsData.invoiceEditPasswordConfigured,
+        );
+      }
+
+      setForm((prev) => ({
+        ...prev,
+        ...nextSettings,
+        invoiceEditPassword: "",
+        invoiceEditPasswordConfirm: "",
+      }));
+
+      localStorage.setItem(
+        "companySettings",
+        JSON.stringify({
+          ...JSON.parse(localStorage.getItem("companySettings") || "{}"),
+          ...getLocalSettings({
+            ...defaultSettings,
+            ...form,
             ...nextSettings,
+            invoiceEditPassword: "",
+            invoiceEditPasswordConfirm: "",
+          }),
+        }),
+      );
+
+      if (settingsData) {
+        localStorage.setItem(
+          "invoiceEditConfig",
+          JSON.stringify({
+            enabled: Boolean(settingsData.invoiceEditEnabled),
+            passwordConfigured: Boolean(settingsData.invoiceEditPasswordConfigured),
           }),
         );
       }
     } catch {
       // local settings still work
     }
-  };
+  }
 
   const saveSettings = async () => {
-    const localSettings = {
-      ...form,
-    };
+    const cleanPassword = form.invoiceEditPassword.trim();
+    const cleanPasswordConfirm = form.invoiceEditPasswordConfirm.trim();
 
-    localStorage.setItem("companySettings", JSON.stringify(localSettings));
+    if (form.invoiceEditEnabled) {
+      if (!form.invoiceEditPasswordConfigured && !cleanPassword) {
+        alert("Please set the invoice edit password before enabling invoice edit.");
+        return;
+      }
 
-    const backendSettings = {
+      if (cleanPassword && cleanPassword.length < 4) {
+        alert("Invoice edit password must be at least 4 characters.");
+        return;
+      }
+
+      if (cleanPassword && cleanPassword !== cleanPasswordConfirm) {
+        alert("Invoice edit passwords do not match.");
+        return;
+      }
+    }
+
+    localStorage.setItem("companySettings", JSON.stringify(getLocalSettings(form)));
+    localStorage.setItem(
+      "invoiceEditConfig",
+      JSON.stringify({
+        enabled: form.invoiceEditEnabled,
+        passwordConfigured:
+          form.invoiceEditPasswordConfigured || Boolean(cleanPassword),
+      }),
+    );
+
+    const backendCompanySettings = {
       salesPrefix: form.salesPrefix || "SAL",
       purchasePrefix: form.purchasePrefix || "PUR",
       salesReturnPrefix: form.salesReturnPrefix || "SR",
       purchaseReturnPrefix: form.purchaseReturnPrefix || "PR",
       financialYear: form.financialYear || "2026-27",
       stockMethod: form.stockMethod || "WEIGHTED_AVG",
-      lowStockLimit: form.lowStockLimit || "10",
       bankName: form.bankName || DEFAULT_BANK_ACCOUNT,
       accountNumber: form.accountNumber || "",
       ifscCode: form.ifscCode || "",
       branchName: form.branchName || "",
       terms: form.terms || "",
+      signatureImage: form.signatureImage || "",
+    };
+
+    const backendSoftwareSettings = {
+      stockMethod: form.stockMethod || "WEIGHTED_AVG",
+      lowStockLimit: form.lowStockLimit || "10",
+      invoiceEditEnabled: form.invoiceEditEnabled,
+      invoiceEditPassword: cleanPassword,
     };
 
     try {
-      const res = await fetch(`${API}/company`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(backendSettings),
-      });
+      const [companyRes, settingsRes] = await Promise.all([
+        fetch(`${API}/company`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(backendCompanySettings),
+        }),
+        fetch(`${API}/settings`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(backendSoftwareSettings),
+        }),
+      ]);
 
-      if (!res.ok) {
-        alert("Settings saved locally. Backend save failed.");
+      const settingsMessage = settingsRes.ok ? "" : await readResponseMessage(settingsRes);
+      const companyMessage = companyRes.ok ? "" : await readResponseMessage(companyRes);
+
+      if (!companyRes.ok || !settingsRes.ok) {
+        alert(
+          settingsMessage ||
+            companyMessage ||
+            "Settings saved locally. Backend save failed.",
+        );
         return;
       }
+
+      const savedSoftwareSettings = await settingsRes.json().catch(() => null);
+
+      setForm((prev) => ({
+        ...prev,
+        invoiceEditEnabled: Boolean(savedSoftwareSettings?.invoiceEditEnabled),
+        invoiceEditPassword: "",
+        invoiceEditPasswordConfirm: "",
+        invoiceEditPasswordConfigured: Boolean(
+          savedSoftwareSettings?.invoiceEditPasswordConfigured,
+        ),
+      }));
+
+      localStorage.setItem(
+        "invoiceEditConfig",
+        JSON.stringify({
+          enabled: Boolean(savedSoftwareSettings?.invoiceEditEnabled),
+          passwordConfigured: Boolean(
+            savedSoftwareSettings?.invoiceEditPasswordConfigured,
+          ),
+        }),
+      );
 
       alert("Settings saved successfully");
     } catch {
@@ -144,6 +413,7 @@ export default function SettingsPage() {
   const clearSettings = () => {
     if (!confirm("Reset software settings?")) return;
     localStorage.removeItem("companySettings");
+    localStorage.removeItem("invoiceEditConfig");
     setForm(defaultSettings);
     alert("Settings reset");
   };
@@ -159,7 +429,6 @@ export default function SettingsPage() {
 
     reader.readAsDataURL(file);
   };
-
 
   const downloadBackup = async () => {
     try {
@@ -236,10 +505,26 @@ export default function SettingsPage() {
             <h2 style={sectionTitle}>Invoice Number Prefix</h2>
 
             <div style={grid}>
-              <Field label="Sales Prefix" value={form.salesPrefix} onChange={(v: string) => update("salesPrefix", v.toUpperCase())} />
-              <Field label="Purchase Prefix" value={form.purchasePrefix} onChange={(v: string) => update("purchasePrefix", v.toUpperCase())} />
-              <Field label="Sales Return Prefix" value={form.salesReturnPrefix} onChange={(v: string) => update("salesReturnPrefix", v.toUpperCase())} />
-              <Field label="Purchase Return Prefix" value={form.purchaseReturnPrefix} onChange={(v: string) => update("purchaseReturnPrefix", v.toUpperCase())} />
+              <Field
+                label="Sales Prefix"
+                value={form.salesPrefix}
+                onChange={(v: string) => update("salesPrefix", v.toUpperCase())}
+              />
+              <Field
+                label="Purchase Prefix"
+                value={form.purchasePrefix}
+                onChange={(v: string) => update("purchasePrefix", v.toUpperCase())}
+              />
+              <Field
+                label="Credit Note Prefix"
+                value={form.salesReturnPrefix}
+                onChange={(v: string) => update("salesReturnPrefix", v.toUpperCase())}
+              />
+              <Field
+                label="Debit Note Prefix"
+                value={form.purchaseReturnPrefix}
+                onChange={(v: string) => update("purchaseReturnPrefix", v.toUpperCase())}
+              />
             </div>
           </div>
 
@@ -247,12 +532,25 @@ export default function SettingsPage() {
             <h2 style={sectionTitle}>Stock & Financial Settings</h2>
 
             <div style={grid}>
-              <Field label="Financial Year" value={form.financialYear} onChange={(v: string) => update("financialYear", v)} />
-              <Field label="Low Stock Alert Limit" value={form.lowStockLimit} onChange={(v: string) => update("lowStockLimit", v)} type="number" />
+              <Field
+                label="Financial Year"
+                value={form.financialYear}
+                onChange={(v: string) => update("financialYear", v)}
+              />
+              <Field
+                label="Low Stock Alert Limit"
+                value={form.lowStockLimit}
+                onChange={(v: string) => update("lowStockLimit", v)}
+                type="number"
+              />
 
               <label style={fieldWrap}>
                 <span style={labelStyle}>Stock Method</span>
-                <select style={input} value={form.stockMethod} onChange={(e) => update("stockMethod", e.target.value)}>
+                <select
+                  style={input}
+                  value={form.stockMethod}
+                  onChange={(e) => update("stockMethod", e.target.value)}
+                >
                   <option value="WEIGHTED_AVG">Weighted Average</option>
                   <option value="FIFO">FIFO</option>
                   <option value="MANUAL">Manual</option>
@@ -262,13 +560,70 @@ export default function SettingsPage() {
           </div>
 
           <div style={section}>
+            <h2 style={sectionTitle}>Invoice Edit Protection</h2>
+            <p style={sectionSub}>
+              Create a password first, then use that password in settings to enable the invoice edit option.
+            </p>
+
+            <label style={toggleCard}>
+              <div style={toggleTextWrap}>
+                <span style={toggleTitle}>Enable invoice edit option</span>
+                <span style={toggleText}>
+                  {form.invoiceEditEnabled
+                    ? "Edit action is now available on invoice reports without asking again for every invoice."
+                    : "Edit action stays hidden on invoice reports until this option is enabled here."}
+                </span>
+              </div>
+              <input
+                style={checkboxInput}
+                type="checkbox"
+                checked={form.invoiceEditEnabled}
+                onChange={(e) => handleInvoiceEditToggle(e.target.checked)}
+              />
+            </label>
+
+            <div style={statusCard}>
+              <p style={helperText}>
+                {form.invoiceEditEnabled
+                  ? "Invoice edit option is enabled. Users can edit invoices directly from the report page."
+                  : form.invoiceEditPasswordConfigured
+                  ? "Password is ready. Turn on the option and enter the saved password once to enable invoice edit."
+                  : "Create and save the password first. After that, use the toggle and enter that password to enable invoice edit."}
+              </p>
+
+              <button
+                style={changePasswordBtn}
+                onClick={() => openInvoiceEditPasswordModal("set-password")}
+              >
+                {form.invoiceEditPasswordConfigured ? "Change Password" : "Set Password"}
+              </button>
+            </div>
+          </div>
+
+          <div style={section}>
             <h2 style={sectionTitle}>Bank Details</h2>
 
             <div style={grid}>
-              <Field label="Bank Name" value={form.bankName} onChange={(v: string) => update("bankName", v)} />
-              <Field label="Account Number" value={form.accountNumber} onChange={(v: string) => update("accountNumber", v)} />
-              <Field label="IFSC Code" value={form.ifscCode} onChange={(v: string) => update("ifscCode", v.toUpperCase())} />
-              <Field label="Branch Name" value={form.branchName} onChange={(v: string) => update("branchName", v)} />
+              <Field
+                label="Bank Name"
+                value={form.bankName}
+                onChange={(v: string) => update("bankName", v)}
+              />
+              <Field
+                label="Account Number"
+                value={form.accountNumber}
+                onChange={(v: string) => update("accountNumber", v)}
+              />
+              <Field
+                label="IFSC Code"
+                value={form.ifscCode}
+                onChange={(v: string) => update("ifscCode", v.toUpperCase())}
+              />
+              <Field
+                label="Branch Name"
+                value={form.branchName}
+                onChange={(v: string) => update("branchName", v)}
+              />
             </div>
           </div>
 
@@ -282,21 +637,24 @@ export default function SettingsPage() {
               onChange={(e) => uploadSignature(e.target.files?.[0])}
             />
 
-            {form.signatureImage && (
+            {form.signatureImage ? (
               <div style={signatureBox}>
-                <img src={form.signatureImage} style={signatureImg} />
+                <img src={form.signatureImage} style={signatureImg} alt="Saved signature" />
                 <button style={removeBtn} onClick={() => update("signatureImage", "")}>
                   Remove Signature
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
 
           <div style={section}>
             <h2 style={sectionTitle}>Invoice Terms</h2>
-            <textarea style={textarea} value={form.terms} onChange={(e) => update("terms", e.target.value)} />
+            <textarea
+              style={textarea}
+              value={form.terms}
+              onChange={(e) => update("terms", e.target.value)}
+            />
           </div>
-
 
           <div style={section}>
             <h2 style={sectionTitle}>Backup & Restore</h2>
@@ -307,7 +665,9 @@ export default function SettingsPage() {
             <div style={backupGrid}>
               <div style={backupBox}>
                 <h3 style={backupTitle}>Download Backup</h3>
-                <p style={backupText}>Export sales, purchases, stock, parties, accounts and settings.</p>
+                <p style={backupText}>
+                  Export sales, purchases, stock, parties, accounts and settings.
+                </p>
                 <button style={backupGreenBtn} onClick={downloadBackup}>
                   Download Backup
                 </button>
@@ -315,7 +675,9 @@ export default function SettingsPage() {
 
               <div style={backupBox}>
                 <h3 style={backupTitle}>Restore Backup</h3>
-                <p style={backupText}>Upload previous backup JSON file and restore your data.</p>
+                <p style={backupText}>
+                  Upload previous backup JSON file and restore your data.
+                </p>
 
                 <input
                   style={input}
@@ -341,11 +703,97 @@ export default function SettingsPage() {
           </div>
         </section>
       </main>
+
+      {showInvoiceEditPasswordModal ? (
+        <div
+          style={modalOverlay}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeInvoiceEditPasswordModal();
+            }
+          }}
+        >
+          <div style={modalCard}>
+            <div style={modalHeader}>
+              <div>
+                <h3 style={modalTitle}>
+                  {invoiceEditModalMode === "verify-enable"
+                    ? "Enable Invoice Edit"
+                    : "Invoice Edit Password"}
+                </h3>
+                <p style={modalText}>
+                  {invoiceEditModalMode === "verify-enable"
+                    ? "Enter the saved invoice edit password once to turn this option on."
+                    : "Set or change the invoice edit password here, then save settings to apply it."}
+                </p>
+              </div>
+
+              <button style={modalCloseBtn} onClick={closeInvoiceEditPasswordModal}>
+                X
+              </button>
+            </div>
+
+            {invoiceEditModalMode === "verify-enable" ? (
+              <div style={singleFieldWrap}>
+                <Field
+                  label="Enter Saved Password"
+                  value={invoiceEditEnablePasswordDraft}
+                  onChange={setInvoiceEditEnablePasswordDraft}
+                  type="password"
+                />
+              </div>
+            ) : (
+              <div style={grid}>
+                <Field
+                  label="Invoice Edit Password"
+                  value={invoiceEditPasswordDraft}
+                  onChange={setInvoiceEditPasswordDraft}
+                  type="password"
+                />
+                <Field
+                  label="Confirm Password"
+                  value={invoiceEditPasswordConfirmDraft}
+                  onChange={setInvoiceEditPasswordConfirmDraft}
+                  type="password"
+                />
+              </div>
+            )}
+
+            <div style={modalButtonRow}>
+              <button style={modalSecondaryBtn} onClick={closeInvoiceEditPasswordModal}>
+                Cancel
+              </button>
+              <button
+                style={modalPrimaryBtn}
+                onClick={
+                  invoiceEditModalMode === "verify-enable"
+                    ? () => void verifyAndEnableInvoiceEdit()
+                    : applyInvoiceEditPassword
+                }
+              >
+                {invoiceEditModalMode === "verify-enable"
+                  ? "Enable Option"
+                  : "Use Password"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }
 
-function Field({ label, value, onChange, type = "text" }: any) {
+function Field({
+  label,
+  value,
+  onChange,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+}) {
   return (
     <label style={fieldWrap}>
       <span style={labelStyle}>{label}</span>
@@ -411,7 +859,6 @@ const sectionTitle: React.CSSProperties = {
   fontWeight: 950,
   color: positiveHeading,
 };
-
 
 const sectionSub: React.CSSProperties = {
   color: positiveMuted,
@@ -486,6 +933,68 @@ const textarea: React.CSSProperties = {
   paddingTop: "14px",
 };
 
+const toggleCard: React.CSSProperties = {
+  ...positivePanel,
+  borderRadius: "18px",
+  padding: "18px 20px",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "18px",
+  marginBottom: "18px",
+};
+
+const toggleTextWrap: React.CSSProperties = {
+  display: "grid",
+  gap: "6px",
+};
+
+const toggleTitle: React.CSSProperties = {
+  color: positiveHeading,
+  fontSize: "17px",
+  fontWeight: 950,
+};
+
+const toggleText: React.CSSProperties = {
+  color: positiveMuted,
+  fontWeight: 700,
+  lineHeight: 1.5,
+};
+
+const checkboxInput: React.CSSProperties = {
+  width: "22px",
+  height: "22px",
+  cursor: "pointer",
+  accentColor: "#16a34a",
+};
+
+const helperText: React.CSSProperties = {
+  margin: 0,
+  color: positiveMuted,
+  fontWeight: 700,
+  lineHeight: 1.5,
+};
+
+const singleFieldWrap: React.CSSProperties = {
+  maxWidth: "420px",
+};
+
+const statusCard: React.CSSProperties = {
+  ...positivePanel,
+  borderRadius: "18px",
+  padding: "18px 20px",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "18px",
+};
+
+const changePasswordBtn: React.CSSProperties = {
+  ...paleButton,
+  padding: "12px 18px",
+  whiteSpace: "nowrap",
+};
+
 const signatureBox: React.CSSProperties = {
   marginTop: "18px",
   display: "flex",
@@ -523,4 +1032,71 @@ const resetBtn: React.CSSProperties = {
 const removeBtn: React.CSSProperties = {
   ...dangerButton,
   padding: "12px 18px",
+};
+
+const modalOverlay: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(61, 43, 0, 0.24)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "20px",
+  zIndex: 1000,
+};
+
+const modalCard: React.CSSProperties = {
+  ...positivePanel,
+  width: "100%",
+  maxWidth: "760px",
+  borderRadius: "24px",
+  padding: "26px",
+};
+
+const modalHeader: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "16px",
+  marginBottom: "20px",
+};
+
+const modalTitle: React.CSSProperties = {
+  margin: 0,
+  color: positiveHeading,
+  fontSize: "28px",
+  fontWeight: 950,
+};
+
+const modalText: React.CSSProperties = {
+  margin: "10px 0 0",
+  color: positiveMuted,
+  fontWeight: 700,
+  lineHeight: 1.5,
+};
+
+const modalCloseBtn: React.CSSProperties = {
+  ...dangerButton,
+  width: "42px",
+  height: "42px",
+  padding: 0,
+  fontSize: "18px",
+  flexShrink: 0,
+};
+
+const modalButtonRow: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: "14px",
+  marginTop: "22px",
+};
+
+const modalSecondaryBtn: React.CSSProperties = {
+  ...paleButton,
+  padding: "16px 18px",
+};
+
+const modalPrimaryBtn: React.CSSProperties = {
+  ...successButton,
+  padding: "16px 18px",
 };

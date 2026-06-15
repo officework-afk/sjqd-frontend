@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 type ResponsiveState = {
   width: number;
@@ -8,6 +8,8 @@ type ResponsiveState = {
   isTablet: boolean;
   isDesktop: boolean;
 };
+
+const DEFAULT_WIDTH = 1280;
 
 const getWidth = () => {
   if (typeof window === "undefined") return 0;
@@ -22,9 +24,9 @@ const getWidth = () => {
 };
 
 export function useResponsive(): ResponsiveState {
-  const [width, setWidth] = useState(getWidth);
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     let timeoutId = 0;
     let frameId = 0;
 

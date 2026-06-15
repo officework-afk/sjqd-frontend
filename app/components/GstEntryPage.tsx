@@ -361,7 +361,7 @@ export default function GstEntryPage({ type }: Props) {
     const gstNumber = profile.gstNumber || profile.gstNo || "";
     const phone = profile.phone || "";
     const address = profile.address || profile.placeOfBusiness || "";
-    const logo = profile.photo || "/software-logo.png";
+    const logo = profile.logo || profile.photo || "/software-logo.png";
 
     const invoiceNo = row.invoiceNo || row.returnNo || "-";
     const partyName = row.partyName || row.supplierName || "-";

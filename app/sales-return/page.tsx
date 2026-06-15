@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import ProfessionalInvoicePage from "../components/ProfessionalInvoicePage";
 
 export default function SalesReturnPage() {
-  return <ProfessionalInvoicePage type="sales-return" />;
+  return (
+    <Suspense fallback={null}>
+      <ProfessionalInvoicePage type="sales-return" />
+    </Suspense>
+  );
 }
