@@ -34,9 +34,18 @@ export default function AppShell({ children }: Props) {
   const [profile, setProfile] = useState<any>({});
   const [hoveredGroup, setHoveredGroup] = useState<string>("");
   const [submenuTop, setSubmenuTop] = useState<number>(120);
+  const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      router.replace("/login");
+      return;
+    }
+
     ensureDefaultAccountStorage();
+    setAuthReady(true);
 
     try {
       const saved = localStorage.getItem("companyProfile");
@@ -79,7 +88,7 @@ export default function AppShell({ children }: Props) {
     };
 
     void loadSharedProfile();
-  }, []);
+  }, [router]);
 
   const closeMenus = useEffectEvent(() => {
     setOpen(false);
@@ -130,6 +139,7 @@ export default function AppShell({ children }: Props) {
 
   const logout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("user");
     closeMenus();
     router.push("/login");
   };
@@ -256,6 +266,10 @@ export default function AppShell({ children }: Props) {
       )}
     </div>
   );
+
+  if (!authReady) {
+    return null;
+  }
 
   return (
     <div style={layout}>

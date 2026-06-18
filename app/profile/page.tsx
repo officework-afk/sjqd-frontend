@@ -12,7 +12,7 @@ export default function ProfilePage() {
   const router = useRouter();
 
   const [form, setForm] = useState({
-    companyName: "SAMUEL PRAKASH",
+    companyName: "",
     proprietorName: "",
     gstNumber: "",
     businessType: "",
@@ -42,14 +42,14 @@ export default function ProfilePage() {
 
       if (data) {
         const nextForm = {
-          companyName: data.companyName ?? form.companyName,
+          companyName: data.companyName ?? "",
           proprietorName: data.proprietorName ?? "",
           gstNumber: data.gstNumber ?? "",
           businessType: data.businessType ?? "",
           phone: data.phone ?? "",
           email: data.email ?? "",
           address: data.address ?? "",
-          logo: data.logo ?? form.logo,
+          logo: data.logo ?? "",
         };
 
         setForm((prev) => ({

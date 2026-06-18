@@ -24,11 +24,15 @@ export default function LoginPage() {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showResetPassword, setShowResetPassword] = useState(false);
   const [message, setMessage] = useState("");
   const [otpPreview, setOtpPreview] = useState("");
   const [otpRequested, setOtpRequested] = useState(false);
-  const [busyAction, setBusyAction] = useState<"" | "password" | "requestOtp" | "otp">("");
+  const [showOtpPanel, setShowOtpPanel] = useState(false);
+  const [otpMode, setOtpMode] = useState<"login" | "reset">("login");
+  const [busyAction, setBusyAction] = useState<"" | "password" | "requestOtp" | "otp" | "reset">("");
 
   useEffect(() => {
     const handleEsc = (event: KeyboardEvent) => {
@@ -44,14 +48,18 @@ export default function LoginPage() {
   const handleIdentifierChange = (value: string) => {
     setIdentifier(value);
     setOtp("");
+    setResetPassword("");
+    setShowResetPassword(false);
     setOtpPreview("");
     setOtpRequested(false);
+    setShowOtpPanel(false);
+    setOtpMode("login");
     setMessage("");
   };
 
   const finishLogin = (data: any) => {
-    localStorage.setItem("token", data.token || "");
     localStorage.setItem("user", JSON.stringify(data.user || {}));
+    localStorage.setItem("token", data.token || "");
     router.push("/subscription?entry=login");
   };
 
@@ -86,8 +94,10 @@ export default function LoginPage() {
     }
   };
 
-  const requestOtp = async () => {
+  const requestOtp = async (mode: "login" | "reset" = otpMode) => {
     setMessage("");
+    setOtpMode(mode);
+    setShowOtpPanel(true);
 
     if (!identifier) {
       setMessage("Enter email or mobile number first");
@@ -151,8 +161,71 @@ export default function LoginPage() {
   };
 
   const forgotPassword = () => {
-    void requestOtp();
+    setOtpMode("reset");
+    setShowOtpPanel(true);
+    setOtpRequested(false);
+    setOtp("");
+    setResetPassword("");
+    setShowResetPassword(false);
+    setOtpPreview("");
+    setMessage("Forgot password? Request an OTP and set a new password. SMS or email delivery must be connected for live OTP.");
   };
+
+  const toggleOtpPanel = () => {
+    setOtpMode("login");
+    setOtpRequested(false);
+    setOtp("");
+    setResetPassword("");
+    setShowResetPassword(false);
+    setOtpPreview("");
+    setMessage("");
+    setShowOtpPanel((prev) => (showOtpPanel && otpMode === "login" ? !prev : true));
+  };
+
+  const resetPasswordWithOtp = async () => {
+    setMessage("");
+
+    if (!identifier || !otp || !resetPassword) {
+      setMessage("Email/mobile number, OTP and new password are required");
+      return;
+    }
+
+    try {
+      setBusyAction("reset");
+      const res = await fetch(`${API}/auth/reset-password-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier, otp, newPassword: resetPassword }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setMessage(data.message || "Password reset failed");
+        return;
+      }
+
+      setPassword("");
+      setOtp("");
+      setResetPassword("");
+      setShowResetPassword(false);
+      setOtpPreview("");
+      setOtpRequested(false);
+      setOtpMode("login");
+      setShowOtpPanel(false);
+      setMessage(data.message || "Password reset successful. Login with your new password.");
+    } catch {
+      setMessage("Server error. Please check backend is running.");
+    } finally {
+      setBusyAction("");
+    }
+  };
+
+  const messageStyle: React.CSSProperties = /otp created|successful|success/i.test(message)
+    ? successMessage
+    : /connect email\/sms|forgot password|request otp|set a new password/i.test(message)
+    ? infoMessage
+    : error;
 
   return (
     <main style={page}>
@@ -206,7 +279,7 @@ export default function LoginPage() {
           onKeyDown={handleEnterAdvance}
         >
           <h2 style={{ ...title, fontSize: isMobile ? 38 : 48 }}>Welcome Back</h2>
-          <p style={subtitle}>Login using password or OTP with email/mobile number</p>
+          <p style={subtitle}>Password login first, OTP only when you really need it</p>
 
           <label style={label}>Email or Mobile Number</label>
           <input
@@ -218,7 +291,10 @@ export default function LoginPage() {
           />
 
           <p style={helperText}>
-            Use password below, or request OTP for quick login with email or mobile number.
+            Keep the daily login simple with password. OTP remains available as a secondary option.
+          </p>
+          <p style={helperTextSecondary}>
+            Use the exact email or mobile number saved during registration. If that account was created with mobile only, email login will not work until an email is added to that account.
           </p>
 
           <label style={label}>Password</label>
@@ -245,9 +321,12 @@ export default function LoginPage() {
           </div>
 
           <div style={forgotRow}>
-            <span style={forgot} onClick={forgotPassword}>
-              Send OTP instead
-            </span>
+            <button type="button" style={linkButton} onClick={forgotPassword}>
+              Forgot password?
+            </button>
+            <button type="button" style={linkButton} onClick={toggleOtpPanel}>
+              {showOtpPanel ? "Hide OTP login" : "Use OTP login"}
+            </button>
           </div>
 
           <button
@@ -259,48 +338,102 @@ export default function LoginPage() {
             {busyAction === "password" ? "Logging in..." : "Login with Password"}
           </button>
 
-          <div style={otpDivider}>or</div>
-
-          <button
-            className="royal-hover"
-            style={secondaryOtpBtn}
-            onClick={requestOtp}
-            disabled={busyAction !== ""}
-          >
-            {busyAction === "requestOtp" ? "Creating OTP..." : "Request OTP"}
-          </button>
-
-          {otpRequested && (
-            <>
-              <label style={{ ...label, marginTop: 20 }}>OTP</label>
-              <input
-                style={input}
-                placeholder="Enter 6-digit OTP"
-                value={otp}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                maxLength={6}
-                onChange={(e) => setOtp(e.target.value)}
-              />
-
-              {otpPreview && (
-                <div style={otpPreviewCard}>
-                  Demo OTP for testing: <b>{otpPreview}</b>
+          {showOtpPanel && (
+            <div style={otpPanel}>
+              <div style={otpPanelHeader}>
+                <div>
+                  <div style={otpPanelTitle}>
+                    {otpMode === "reset" ? "Reset password with OTP" : "OTP Login"}
+                  </div>
+                  <p style={otpPanelText}>
+                    {otpMode === "reset"
+                      ? "Request a reset OTP, then choose a new password. SMS or email delivery must be connected for live OTP."
+                      : "Use this only when password login is not available. SMS or email delivery must be connected for live OTP."}
+                  </p>
                 </div>
-              )}
+              </div>
 
               <button
                 className="royal-hover"
-                style={otpBtn}
-                onClick={loginWithOtp}
+                style={secondaryOtpBtn}
+                onClick={() => requestOtp(otpMode)}
                 disabled={busyAction !== ""}
               >
-                {busyAction === "otp" ? "Verifying OTP..." : "Login with OTP"}
+                {busyAction === "requestOtp"
+                  ? "Creating OTP..."
+                  : otpMode === "reset"
+                  ? "Send Reset OTP"
+                  : "Send Login OTP"}
               </button>
-            </>
+
+              {otpRequested && (
+                <>
+                  <label style={{ ...label, marginTop: 18 }}>OTP</label>
+                  <input
+                    style={input}
+                    placeholder="Enter 6-digit OTP"
+                    value={otp}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    onChange={(e) => setOtp(e.target.value)}
+                  />
+
+                  {otpPreview && (
+                    <div style={otpPreviewCard}>
+                      Demo OTP for testing: <b>{otpPreview}</b>
+                    </div>
+                  )}
+
+                  {otpMode === "reset" ? (
+                    <>
+                      <label style={{ ...label, marginTop: 16 }}>New Password</label>
+                      <div style={passwordBox}>
+                        <input
+                          style={passwordInput}
+                          placeholder="Enter new password"
+                          type={showResetPassword ? "text" : "password"}
+                          value={resetPassword}
+                          autoComplete="new-password"
+                          onChange={(e) => setResetPassword(e.target.value)}
+                        />
+
+                        <button
+                          type="button"
+                          className="royal-hover"
+                          style={eyeBtn}
+                          data-enter-skip="true"
+                          onClick={() => setShowResetPassword((prev) => !prev)}
+                        >
+                          {showResetPassword ? "Hide" : "Show"}
+                        </button>
+                      </div>
+
+                      <button
+                        className="royal-hover"
+                        style={otpBtn}
+                        onClick={resetPasswordWithOtp}
+                        disabled={busyAction !== ""}
+                      >
+                        {busyAction === "reset" ? "Resetting password..." : "Reset Password"}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="royal-hover"
+                      style={otpBtn}
+                      onClick={loginWithOtp}
+                      disabled={busyAction !== ""}
+                    >
+                      {busyAction === "otp" ? "Verifying OTP..." : "Login with OTP"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           )}
 
-          {message && <p style={error}>{message}</p>}
+          {message && <p style={messageStyle}>{message}</p>}
 
           <p style={bottomText}>
             Don&apos;t have an account?{" "}
@@ -431,10 +564,19 @@ const subtitle: React.CSSProperties = {
 
 const helperText: React.CSSProperties = {
   marginTop: "-6px",
-  marginBottom: "18px",
+  marginBottom: "8px",
   color: "#64748b",
   fontSize: "14px",
   lineHeight: 1.6,
+  fontWeight: 700,
+};
+
+const helperTextSecondary: React.CSSProperties = {
+  marginTop: 0,
+  marginBottom: "18px",
+  color: "#7c3aed",
+  fontSize: "13px",
+  lineHeight: 1.55,
   fontWeight: 700,
 };
 
@@ -488,15 +630,22 @@ const eyeBtn: React.CSSProperties = {
 };
 
 const forgotRow: React.CSSProperties = {
-  textAlign: "right",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
   marginTop: "12px",
   marginBottom: "22px",
 };
 
-const forgot: React.CSSProperties = {
+const linkButton: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  padding: 0,
   color: "#2563eb",
   fontWeight: 800,
   cursor: "pointer",
+  fontSize: "15px",
 };
 
 const mainBtn: React.CSSProperties = {
@@ -511,16 +660,6 @@ const mainBtn: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const otpDivider: React.CSSProperties = {
-  margin: "18px 0 14px",
-  textAlign: "center",
-  color: "#94a3b8",
-  fontWeight: 800,
-  textTransform: "uppercase",
-  letterSpacing: 0.8,
-  fontSize: "12px",
-};
-
 const secondaryOtpBtn: React.CSSProperties = {
   width: "100%",
   height: "56px",
@@ -531,6 +670,36 @@ const secondaryOtpBtn: React.CSSProperties = {
   fontSize: "18px",
   fontWeight: 900,
   cursor: "pointer",
+};
+
+const otpPanel: React.CSSProperties = {
+  marginTop: "6px",
+  padding: "18px",
+  borderRadius: "18px",
+  border: "1px solid rgba(180,83,9,0.22)",
+  background: "linear-gradient(180deg,#fffaf0,#fff7ed)",
+};
+
+const otpPanelHeader: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+  marginBottom: "14px",
+};
+
+const otpPanelTitle: React.CSSProperties = {
+  color: "#7c2d12",
+  fontWeight: 900,
+  fontSize: "18px",
+};
+
+const otpPanelText: React.CSSProperties = {
+  margin: "6px 0 0",
+  color: "#9a3412",
+  fontSize: "13px",
+  lineHeight: 1.6,
+  fontWeight: 700,
 };
 
 const otpPreviewCard: React.CSSProperties = {
@@ -554,6 +723,16 @@ const error: React.CSSProperties = {
   textAlign: "center",
   marginTop: "18px",
   fontWeight: 700,
+};
+
+const infoMessage: React.CSSProperties = {
+  ...error,
+  color: "#b45309",
+};
+
+const successMessage: React.CSSProperties = {
+  ...error,
+  color: "#15803d",
 };
 
 const bottomText: React.CSSProperties = {

@@ -357,7 +357,7 @@ export default function GstEntryPage({ type }: Props) {
     const savedProfile = localStorage.getItem("companyProfile");
     const profile = savedProfile ? JSON.parse(savedProfile) : {};
 
-    const companyName = profile.companyName || "SAMUEL PRAKASH";
+    const companyName = profile.companyName || "SJQD SOFTWARE";
     const gstNumber = profile.gstNumber || profile.gstNo || "";
     const phone = profile.phone || "";
     const address = profile.address || profile.placeOfBusiness || "";

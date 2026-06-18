@@ -19,6 +19,77 @@ import {
 } from "../components/positiveTheme";
 
 const API = API_BASE_URL;
+const USER_STORAGE_PREFIX = "sjqd:user:";
+
+const getAuthHeaders = (includeJson = true) => {
+  const headers: Record<string, string> = {};
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+
+  if (includeJson) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  return headers;
+};
+
+const getAuthToken = () =>
+  typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+
+const clearCurrentAccountScopedStorage = () => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const rawUser = localStorage.getItem("user");
+    const parsedUser = rawUser ? JSON.parse(rawUser) : {};
+    const userId = String(parsedUser?.id || parsedUser?.userId || "").trim();
+    const keysToRemove: string[] = [];
+
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key) continue;
+
+      if (userId && key.startsWith(`${USER_STORAGE_PREFIX}${userId}:`)) {
+        keysToRemove.push(key);
+      }
+    }
+
+    keysToRemove.forEach((key) => localStorage.removeItem(key));
+
+    [
+      "companySettings",
+      "company",
+      "companyProfile",
+      "businessProfile",
+      "settings",
+      "profile",
+      "items",
+      "buyerMaster",
+      "supplierMaster",
+      "cashMaster",
+      "cashEntries",
+      "cashInHand",
+      "bankMaster",
+      "bankEntries",
+      "bankBalance",
+      "paymentMaster",
+      "receivableMaster",
+      "defaultCashAccount",
+      "defaultBankAccount",
+      "invoiceEditConfig",
+      "invoicePaymentStatus",
+      "invoiceInvoiceMeta",
+    ].forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // ignore storage cleanup issues after clear-data action
+  }
+};
 
 type SettingsForm = {
   salesPrefix: string;
@@ -100,6 +171,11 @@ export default function SettingsPage() {
     useState("");
   const [invoiceEditEnablePasswordDraft, setInvoiceEditEnablePasswordDraft] =
     useState("");
+  const [showDeleteDataModal, setShowDeleteDataModal] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [backupDownloading, setBackupDownloading] = useState(false);
+  const [backupRestoring, setBackupRestoring] = useState(false);
+  const [deletingAccountData, setDeletingAccountData] = useState(false);
 
   useEffect(() => {
     void loadSettings();
@@ -110,6 +186,21 @@ export default function SettingsPage() {
       ...prev,
       [key]: value,
     }));
+  };
+
+  const ensureAuthenticated = (message?: string) => {
+    const token = getAuthToken();
+
+    if (token) {
+      return token;
+    }
+
+    if (message) {
+      alert(message);
+    }
+
+    router.push("/login");
+    return "";
   };
 
   const closeInvoiceEditPasswordModal = () => {
@@ -128,6 +219,16 @@ export default function SettingsPage() {
     setInvoiceEditPasswordDraft("");
     setInvoiceEditPasswordConfirmDraft("");
     setInvoiceEditEnablePasswordDraft("");
+  };
+
+  const closeDeleteDataModal = () => {
+    setShowDeleteDataModal(false);
+    setDeletePassword("");
+  };
+
+  const openDeleteDataModal = () => {
+    setShowDeleteDataModal(true);
+    setDeletePassword("");
   };
 
   const handleInvoiceEditToggle = (checked: boolean) => {
@@ -187,11 +288,13 @@ export default function SettingsPage() {
     }
 
     try {
+      if (!ensureAuthenticated("Please login again to verify the invoice edit password.")) {
+        return;
+      }
+
       const res = await fetch(`${API}/settings/invoice-edit/verify`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ password }),
       });
 
@@ -214,6 +317,10 @@ export default function SettingsPage() {
 
   async function loadSettings() {
     try {
+      if (!ensureAuthenticated()) {
+        return;
+      }
+
       const local = localStorage.getItem("companySettings");
 
       if (local) {
@@ -227,8 +334,12 @@ export default function SettingsPage() {
       }
 
       const [companyRes, settingsRes] = await Promise.all([
-        fetch(`${API}/company`),
-        fetch(`${API}/settings`),
+        fetch(`${API}/company`, {
+          headers: getAuthHeaders(false),
+        }),
+        fetch(`${API}/settings`, {
+          headers: getAuthHeaders(false),
+        }),
       ]);
 
       const companyData = companyRes.ok ? await companyRes.json() : null;
@@ -353,19 +464,19 @@ export default function SettingsPage() {
     };
 
     try {
+      if (!ensureAuthenticated("Please login again before saving settings.")) {
+        return;
+      }
+
       const [companyRes, settingsRes] = await Promise.all([
         fetch(`${API}/company`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: getAuthHeaders(),
           body: JSON.stringify(backendCompanySettings),
         }),
         fetch(`${API}/settings`, {
           method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: getAuthHeaders(),
           body: JSON.stringify(backendSoftwareSettings),
         }),
       ]);
@@ -432,8 +543,26 @@ export default function SettingsPage() {
 
   const downloadBackup = async () => {
     try {
-      const res = await fetch(`${API}/backup/export`);
-      const data = await res.json();
+      if (!ensureAuthenticated("Please login again before downloading backup.")) {
+        return false;
+      }
+
+      setBackupDownloading(true);
+      const res = await fetch(`${API}/backup/export`, {
+        headers: getAuthHeaders(false),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        router.push("/login");
+        return false;
+      }
+
+      if (!res.ok) {
+        alert(data?.message || "Backup download failed");
+        return false;
+      }
 
       const blob = new Blob([JSON.stringify(data, null, 2)], {
         type: "application/json",
@@ -447,8 +576,12 @@ export default function SettingsPage() {
       a.click();
 
       URL.revokeObjectURL(url);
+      return true;
     } catch {
       alert("Backup download failed. Please check backend server.");
+      return false;
+    } finally {
+      setBackupDownloading(false);
     }
   };
 
@@ -461,16 +594,27 @@ export default function SettingsPage() {
     if (!confirm("Restore will replace current data. Continue?")) return;
 
     try {
+      if (!ensureAuthenticated("Please login again before restoring backup.")) {
+        return;
+      }
+
+      setBackupRestoring(true);
       const text = await backupFile.text();
       const json = JSON.parse(text);
 
       const res = await fetch(`${API}/backup/restore`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify(json),
       });
 
       const data = await res.json();
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        router.push("/login");
+        return;
+      }
 
       if (!res.ok) {
         alert(data.message || "Restore failed");
@@ -481,6 +625,68 @@ export default function SettingsPage() {
       router.push("/dashboard");
     } catch {
       alert("Invalid backup file or restore failed.");
+    } finally {
+      setBackupRestoring(false);
+    }
+  };
+
+  const clearAccountData = async () => {
+    const password = deletePassword.trim();
+
+    if (!password) {
+      alert("Please enter the current account password.");
+      return;
+    }
+
+    if (
+      !confirm(
+        "This will permanently clear all data for only this account. Your login will stay, but invoice data, item data, stock summary data, cash/bank data, receivable/payment data, parties, settings and reports will be removed. Continue?",
+      )
+    ) {
+      return;
+    }
+
+    try {
+      if (!ensureAuthenticated("Please login again before deleting account data.")) {
+        return;
+      }
+
+      setDeletingAccountData(true);
+      const res = await fetch(`${API}/backup/clear-account`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          password,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        router.push("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          alert("Clear account route not found in backend. Restart backend server and try again.");
+          return;
+        }
+
+        alert(data?.message || "Could not clear account data");
+        return;
+      }
+
+      clearCurrentAccountScopedStorage();
+      setBackupFile(null);
+      closeDeleteDataModal();
+      setForm(defaultSettings);
+      await loadSettings();
+      alert(data?.message || "Account data cleared successfully");
+    } catch {
+      alert("Failed to clear account data. Please try again.");
+    } finally {
+      setDeletingAccountData(false);
     }
   };
 
@@ -668,8 +874,12 @@ export default function SettingsPage() {
                 <p style={backupText}>
                   Export sales, purchases, stock, parties, accounts and settings.
                 </p>
-                <button style={backupGreenBtn} onClick={downloadBackup}>
-                  Download Backup
+                <button
+                  style={backupGreenBtn}
+                  onClick={() => void downloadBackup()}
+                  disabled={backupDownloading || deletingAccountData}
+                >
+                  {backupDownloading ? "Preparing Backup..." : "Download Backup"}
                 </button>
               </div>
 
@@ -686,8 +896,42 @@ export default function SettingsPage() {
                   onChange={(e) => setBackupFile(e.target.files?.[0] || null)}
                 />
 
-                <button style={backupRedBtn} onClick={restoreBackup}>
-                  Restore Backup
+                <button
+                  style={backupRedBtn}
+                  onClick={() => void restoreBackup()}
+                  disabled={backupRestoring || deletingAccountData}
+                >
+                  {backupRestoring ? "Restoring Backup..." : "Restore Backup"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div style={section}>
+            <h2 style={sectionTitle}>Danger Zone</h2>
+            <p style={sectionSub}>
+              Clear only this account&apos;s business data. Login access stays, but invoices,
+              items, stock summary, cash/bank, receivable/payment, parties, company
+              profile, settings and reports will be removed.
+            </p>
+
+            <div style={dangerZoneCard}>
+              <div style={dangerZoneTextWrap}>
+                <h3 style={dangerZoneTitle}>Delete all data for this account</h3>
+                <p style={dangerZoneText}>
+                  Use the current account password to clear invoice data, item data,
+                  stock summary data, cash/bank records, receivable/payment records and
+                  other business data in this account.
+                </p>
+              </div>
+
+              <div style={dangerZoneActionRow}>
+                <button
+                  style={dangerZoneDeleteBtn}
+                  onClick={openDeleteDataModal}
+                  disabled={deletingAccountData}
+                >
+                  Delete All Account Data
                 </button>
               </div>
             </div>
@@ -774,6 +1018,71 @@ export default function SettingsPage() {
                 {invoiceEditModalMode === "verify-enable"
                   ? "Enable Option"
                   : "Use Password"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showDeleteDataModal ? (
+        <div
+          style={modalOverlay}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDeleteDataModal();
+            }
+          }}
+        >
+          <div style={modalCard}>
+            <div style={modalHeader}>
+              <div>
+                <h3 style={modalTitle}>Delete Account Data</h3>
+                <p style={modalText}>
+                  This removes only the current account&apos;s data. Enter the current
+                  account password to continue.
+                </p>
+              </div>
+
+              <button style={modalCloseBtn} onClick={closeDeleteDataModal}>
+                X
+              </button>
+            </div>
+
+            <div style={dangerWarningCard}>
+              <strong style={dangerWarningTitle}>Permanent action</strong>
+              <p style={dangerWarningText}>
+                Sales, purchase, returns, adjustments, items, stock summary data,
+                cash/bank data, receivable/payment data, party masters, company profile,
+                settings and reports for this account will be deleted.
+              </p>
+            </div>
+
+            <div style={singleFieldWrap}>
+              <Field
+                label="Current Account Password"
+                value={deletePassword}
+                onChange={setDeletePassword}
+                type="password"
+              />
+            </div>
+
+            <div style={dangerModalButtonRow}>
+              <button
+                style={modalSecondaryBtn}
+                onClick={() => void downloadBackup()}
+                disabled={backupDownloading || deletingAccountData}
+              >
+                {backupDownloading ? "Preparing Backup..." : "Download Backup"}
+              </button>
+              <button style={modalSecondaryBtn} onClick={closeDeleteDataModal}>
+                Cancel
+              </button>
+              <button
+                style={dangerZoneDeleteBtn}
+                onClick={() => void clearAccountData()}
+                disabled={deletingAccountData}
+              >
+                {deletingAccountData ? "Deleting Data..." : "Delete Everything"}
               </button>
             </div>
           </div>
@@ -896,6 +1205,54 @@ const backupGreenBtn: React.CSSProperties = {
 };
 
 const backupRedBtn: React.CSSProperties = {
+  ...dangerButton,
+  padding: "15px 24px",
+};
+
+const dangerZoneCard: React.CSSProperties = {
+  ...positivePanel,
+  borderRadius: "20px",
+  padding: "24px",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "20px",
+  border: "1px solid rgba(220, 38, 38, 0.18)",
+};
+
+const dangerZoneTextWrap: React.CSSProperties = {
+  display: "grid",
+  gap: "10px",
+};
+
+const dangerZoneTitle: React.CSSProperties = {
+  margin: 0,
+  fontSize: "20px",
+  fontWeight: 950,
+  color: positiveHeading,
+};
+
+const dangerZoneText: React.CSSProperties = {
+  margin: 0,
+  color: positiveMuted,
+  fontWeight: 700,
+  lineHeight: 1.6,
+};
+
+const dangerZoneNote: React.CSSProperties = {
+  margin: 0,
+  color: "#166534",
+  fontWeight: 800,
+  lineHeight: 1.5,
+};
+
+const dangerZoneActionRow: React.CSSProperties = {
+  display: "grid",
+  gap: "12px",
+  minWidth: "260px",
+};
+
+const dangerZoneDeleteBtn: React.CSSProperties = {
   ...dangerButton,
   padding: "15px 24px",
 };
@@ -1091,6 +1448,13 @@ const modalButtonRow: React.CSSProperties = {
   marginTop: "22px",
 };
 
+const dangerModalButtonRow: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr 1fr",
+  gap: "14px",
+  marginTop: "22px",
+};
+
 const modalSecondaryBtn: React.CSSProperties = {
   ...paleButton,
   padding: "16px 18px",
@@ -1099,4 +1463,24 @@ const modalSecondaryBtn: React.CSSProperties = {
 const modalPrimaryBtn: React.CSSProperties = {
   ...successButton,
   padding: "16px 18px",
+};
+
+const dangerWarningCard: React.CSSProperties = {
+  borderRadius: "18px",
+  padding: "18px 20px",
+  background: "rgba(220, 38, 38, 0.08)",
+  border: "1px solid rgba(220, 38, 38, 0.18)",
+  marginBottom: "18px",
+};
+
+const dangerWarningTitle: React.CSSProperties = {
+  color: "#991b1b",
+  fontWeight: 950,
+};
+
+const dangerWarningText: React.CSSProperties = {
+  margin: "10px 0 0",
+  color: "#7f1d1d",
+  fontWeight: 700,
+  lineHeight: 1.6,
 };

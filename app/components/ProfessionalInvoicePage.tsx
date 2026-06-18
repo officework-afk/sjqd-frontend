@@ -41,6 +41,18 @@ type PageType =
   | "sales-adjustment"
   | "purchase-adjustment";
 
+const SOURCE_DOCUMENT_LABELS: Record<string, string> = {
+  sales: "Sales Invoice",
+  purchase: "Purchase Invoice",
+  "sales-return": "Credit Note",
+  "purchase-return": "Debit Note",
+  "sales-adjustment": "Sales Adjustment",
+  "purchase-adjustment": "Purchase Adjustment",
+};
+
+const getSourceDocumentLabel = (endpointKey: string) =>
+  SOURCE_DOCUMENT_LABELS[String(endpointKey || "").trim()] || "Invoice";
+
 type InvoiceLine = {
   id: number;
   itemName: string;
@@ -397,6 +409,13 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     type === "sales" ||
     type === "sales-return" ||
     type === "sales-adjustment";
+  const additionalSourceEndpoints = useMemo(() => {
+    if (type === "sales-return") {
+      return [{ endpoint: "purchase", label: getSourceDocumentLabel("purchase") }];
+    }
+
+    return [] as Array<{ endpoint: string; label: string }>;
+  }, [type]);
 
   const isQuickAccountPartyName = (value: string) => {
     const normalized = normalizeAccountMode(value, value);
@@ -415,6 +434,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const [company, setCompany] = useState<any>({});
   const [entries, setEntries] = useState<any[]>([]);
   const [sourceEntries, setSourceEntries] = useState<any[]>([]);
+  const [extraSourceEntries, setExtraSourceEntries] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [parties, setParties] = useState<PartyRow[]>([]);
   const [invoiceItems, setInvoiceItems] = useState<InvoiceLine[]>([]);
@@ -747,13 +767,16 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
 
   const loadAll = async () => {
     try {
-      const [companyRes, entryRes, itemRes, sourceEntryRes] = await Promise.all([
+      const [companyRes, entryRes, itemRes, sourceEntryRes, ...extraSourceResponses] = await Promise.all([
         fetch(`${API}/company`).catch(() => null),
         fetch(`${API}/${cfg.endpoint}`).catch(() => null),
         fetch(`${API}/items`).catch(() => null),
         cfg.sourceEndpoint
           ? fetch(`${API}/${cfg.sourceEndpoint}`).catch(() => null)
           : Promise.resolve(null),
+        ...additionalSourceEndpoints.map(({ endpoint }) =>
+          fetch(`${API}/${endpoint}`).catch(() => null),
+        ),
       ]);
 
       const companyData = companyRes ? await companyRes.json().catch(() => ({})) : {};
@@ -762,16 +785,40 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       const sourceData = sourceEntryRes
         ? await sourceEntryRes.json().catch(() => [])
         : [];
+      const extraSourceData = await Promise.all(
+        extraSourceResponses.map(async (response, index) => {
+          const sourceConfig = additionalSourceEndpoints[index];
+          const rows = response ? await response.json().catch(() => []) : [];
+
+          if (!Array.isArray(rows) || !sourceConfig) {
+            return [];
+          }
+
+          return rows.map((row: any) => ({
+            ...row,
+            sourceEndpointKey: sourceConfig.endpoint,
+            sourceLabel: sourceConfig.label,
+          }));
+        }),
+      );
 
       setCompany(companyData || {});
       setEntries(Array.isArray(entryData) ? entryData : []);
-      setSourceEntries(Array.isArray(sourceData) ? sourceData : []);
+      setSourceEntries(
+        (Array.isArray(sourceData) ? sourceData : []).map((row: any) => ({
+          ...row,
+          sourceEndpointKey: cfg.sourceEndpoint || cfg.endpoint,
+          sourceLabel: getSourceDocumentLabel(cfg.sourceEndpoint || cfg.endpoint),
+        })),
+      );
+      setExtraSourceEntries(extraSourceData.flat());
       setItems(Array.isArray(itemData) ? itemData : getStorageArray("items"));
     } catch (err) {
       console.error("Load error:", err);
       setCompany({});
       setEntries([]);
       setSourceEntries([]);
+      setExtraSourceEntries([]);
       setItems(getStorageArray("items"));
     }
 
@@ -1695,7 +1742,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const applySourceInvoiceSelection = (entry: any) => {
     const snapshot = buildOriginalSnapshot(
       entry,
-      cfg.sourceEndpoint || cfg.endpoint,
+      entry?.sourceEndpointKey || cfg.sourceEndpoint || cfg.endpoint,
     );
 
     if (!snapshot.invoiceNo) {
@@ -2162,11 +2209,16 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       }
     }
 
-    let res = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+const token = localStorage.getItem("token");
+
+let res = await fetch(url, {
+  method,
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  },
+  body: JSON.stringify(payload),
+});
 
     if (!res.ok) {
       const msg = await res.text().catch(() => "");
@@ -2174,7 +2226,10 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
       if (shouldRetryWithDirectBackend(res, msg)) {
         const fallbackRes = await fetch(getDirectApiUrl(apiPath), {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: {
+  "Content-Type": "application/json",
+  Authorization: `Bearer ${token}`,
+},
           body: JSON.stringify(payload),
         }).catch(() => null);
 
@@ -2842,14 +2897,22 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
   const sourceInvoiceOptions = useMemo(() => {
     const uniqueInvoices = new Map<string, any>();
 
-    (Array.isArray(sourceEntries) ? sourceEntries : []).forEach((entry: any) => {
+    [...(Array.isArray(sourceEntries) ? sourceEntries : []), ...(Array.isArray(extraSourceEntries) ? extraSourceEntries : [])].forEach((entry: any) => {
       const invoiceNo = resolveDocumentNo(entry);
-      if (!invoiceNo || uniqueInvoices.has(invoiceNo)) return;
-      uniqueInvoices.set(invoiceNo, {
+      const sourceEndpointKey = String(
+        entry?.sourceEndpointKey || cfg.sourceEndpoint || cfg.endpoint || "",
+      ).trim();
+      const optionKey = `${sourceEndpointKey}:${invoiceNo}`;
+      if (!invoiceNo || uniqueInvoices.has(optionKey)) return;
+      uniqueInvoices.set(optionKey, {
         ...entry,
         invoiceNo,
         partyName: String(entry?.partyName || entry?.supplierName || "").trim(),
         gstNo: String(entry?.gstNo || "").trim(),
+        sourceEndpointKey,
+        sourceLabel: String(
+          entry?.sourceLabel || getSourceDocumentLabel(sourceEndpointKey),
+        ).trim(),
       });
     });
 
@@ -2859,7 +2922,7 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
         sensitivity: "base",
       }),
     );
-  }, [sourceEntries]);
+  }, [cfg.endpoint, cfg.sourceEndpoint, extraSourceEntries, sourceEntries]);
 
   const filteredSourceInvoiceOptions = useMemo(() => {
     const query = String(form.originalInvoiceNo || "")
@@ -2869,16 +2932,18 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
     if (!query) return sourceInvoiceOptions;
 
     return sourceInvoiceOptions.filter((entry) => {
-      const invoiceNo = String(entry.invoiceNo || "").toLowerCase();
-      const partyName = String(entry.partyName || "").toLowerCase();
-      const gstNo = String(entry.gstNo || "").toLowerCase();
-      return (
-        invoiceNo.includes(query) ||
-        partyName.includes(query) ||
-        gstNo.includes(query)
-      );
-    });
-  }, [form.originalInvoiceNo, sourceInvoiceOptions]);
+        const invoiceNo = String(entry.invoiceNo || "").toLowerCase();
+        const partyName = String(entry.partyName || "").toLowerCase();
+        const gstNo = String(entry.gstNo || "").toLowerCase();
+        const sourceLabel = String(entry.sourceLabel || "").toLowerCase();
+        return (
+          invoiceNo.includes(query) ||
+          partyName.includes(query) ||
+          gstNo.includes(query) ||
+          sourceLabel.includes(query)
+        );
+      });
+    }, [form.originalInvoiceNo, sourceInvoiceOptions]);
 
   const filteredItems = useMemo(() => {
     const q = itemSearch.trim().toLowerCase();
@@ -3124,6 +3189,8 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                     placeholder={
                       cfg.isAdjustment && originalSnapshot?.invoiceNo
                         ? `Leave blank for auto: ${originalSnapshot.invoiceNo}`
+                        : additionalSourceEndpoints.length
+                        ? "Select sales or purchase invoice number"
                         : "Select original invoice number"
                     }
                     onChange={(e) => {
@@ -3215,7 +3282,9 @@ export default function ProfessionalInvoicePage({ type }: { type: PageType }) {
                                 opacity: 0.88,
                               }}
                             >
-                              {entry.partyName || "Party"}{entry.gstNo ? ` | GST: ${entry.gstNo}` : ""}
+                              {entry.sourceLabel ? `${entry.sourceLabel} | ` : ""}
+                              {entry.partyName || "Party"}
+                              {entry.gstNo ? ` | GST: ${entry.gstNo}` : ""}
                             </span>
                           </div>
                         ))}

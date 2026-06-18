@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import ClientRuntime from "./components/ClientRuntime";
 import "./globals.css";
 
 export const viewport: Viewport = {
@@ -65,7 +66,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <ClientRuntime />
+        {children}
+      </body>
     </html>
   );
 }

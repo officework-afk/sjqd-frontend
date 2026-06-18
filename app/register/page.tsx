@@ -39,6 +39,15 @@ export default function RegisterPage() {
     return () => window.removeEventListener("keydown", handleEsc);
   }, [router]);
 
+  useEffect(() => {
+    try {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+    } catch {
+      // ignore storage cleanup failures on register entry
+    }
+  }, []);
+
   const register = async () => {
     setMessage("");
 
@@ -61,7 +70,13 @@ export default function RegisterPage() {
         return;
       }
 
-      alert("Account created successfully. You can login with password or OTP.");
+      if (data?.token && data?.user) {
+        localStorage.setItem("user", JSON.stringify(data.user));
+        localStorage.setItem("token", data.token);
+        router.push("/subscription?entry=register");
+        return;
+      }
+
       router.push("/login");
     } catch {
       setMessage("Server error. Please check backend is running.");

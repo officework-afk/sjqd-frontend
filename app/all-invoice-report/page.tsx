@@ -25,6 +25,14 @@ import {
 } from "../components/excelUtils";
 
 const API = API_BASE_URL;
+const getAuthHeaders = () => {
+  const token = localStorage.getItem("token");
+
+  return {
+    "Content-Type": "application/json",
+    Authorization: token ? `Bearer ${token}` : "",
+  };
+};
 
 type TabType =
   | "ALL"
@@ -193,12 +201,28 @@ export default function AllInvoiceReportPage() {
 
   useEffect(() => {
     void loadRows();
-    loadCompanySettings();
+    void loadCompanySettings();
     void loadInvoiceEditSettings();
     window.setTimeout(() => searchRef.current?.focus(), 220);
   }, []);
 
-  const loadCompanySettings = () => {
+  const loadCompanySettings = async () => {
+    try {
+      const res = await fetch(`${API}/company`, {
+        headers: getAuthHeaders(),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+          setCompany(data as Record<string, unknown>);
+          return;
+        }
+      }
+    } catch {
+      // fall back to scoped local storage below
+    }
+
     try {
       const keys = [
         "companySettings",
@@ -231,7 +255,9 @@ export default function AllInvoiceReportPage() {
 
   const loadInvoiceEditSettings = async () => {
     try {
-      const res = await fetch(`${API}/settings`);
+      const res = await fetch(`${API}/settings`, {
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) {
         throw new Error("settings fetch failed");
       }
@@ -440,31 +466,38 @@ export default function AllInvoiceReportPage() {
   const loadRows = async () => {
     setLoading(true);
     try {
-      const [
-        salesRes,
-        purchaseRes,
-        salesReturnRes,
-        purchaseReturnRes,
-        salesAdjustmentRes,
-        purchaseAdjustmentRes,
-      ] =
-        await Promise.all([
-          fetch(`${API}/sales`).then((res) => (res.ok ? res.json() : [])),
-          fetch(`${API}/purchase`).then((res) => (res.ok ? res.json() : [])),
-          fetch(`${API}/sales-return`).then((res) =>
-            res.ok ? res.json() : [],
-          ),
-          fetch(`${API}/purchase-return`).then((res) =>
-            res.ok ? res.json() : [],
-          ),
-          fetch(`${API}/sales-adjustment`).then((res) =>
-            res.ok ? res.json() : [],
-          ),
-          fetch(`${API}/purchase-adjustment`).then((res) =>
-            res.ok ? res.json() : [],
-          ),
-        ]);
+const [
+  salesRes,
+  purchaseRes,
+  salesReturnRes,
+  purchaseReturnRes,
+  salesAdjustmentRes,
+  purchaseAdjustmentRes,
+] = await Promise.all([
+  fetch(`${API}/sales`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
 
+  fetch(`${API}/purchase`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
+
+  fetch(`${API}/sales-return`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
+
+  fetch(`${API}/purchase-return`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
+
+  fetch(`${API}/sales-adjustment`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
+
+  fetch(`${API}/purchase-adjustment`, {
+    headers: getAuthHeaders(),
+  }).then((res) => (res.ok ? res.json() : [])),
+]);
       setRows([
         ...makeRows(salesRes, "SALES", "/sales"),
         ...makeRows(purchaseRes, "PURCHASE", "/purchase"),
@@ -658,7 +691,7 @@ export default function AllInvoiceReportPage() {
 
         const res = await fetch(`${API}/${endpoint}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify(body),
         });
 
